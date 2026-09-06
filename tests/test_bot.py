@@ -170,6 +170,61 @@ def test_concurrent_upload_returns_busy(monkeypatch):
         main._thread_lock.release()
 
 
+# ---------- login_flow (stubbed library) ----------
+
+def test_login_code_flow_with_stub(monkeypatch):
+    import app.login_flow as lf
+
+    def fake_perform(job, username, password, cb):
+        lf._push(job, "hello")
+        code = cb("email", "t***@example.com")
+        assert code == "123456"
+        class FakeAuth:
+            def save_session(self, path):
+                with open(path, "w") as fh:
+                    fh.write('{"ok": true}')
+        class FakeIG:
+            auth = FakeAuth()
+            account = None
+        return FakeIG()
+
+    monkeypatch.setattr(lf, "_perform_login", fake_perform)
+    jid = lf.start_job("someone", "secret-pw")
+    import time
+    for _ in range(100):
+        job = lf.get_job(jid)
+        assert job is not None
+        if job.status == "awaiting_code":
+            break
+        time.sleep(0.05)
+    waiting = lf.get_job(jid)
+    assert waiting is not None and waiting.status == "awaiting_code"
+    assert lf.submit_code(jid, "123456")
+    for _ in range(100):
+        job = lf.get_job(jid)
+        assert job is not None
+        if job.status == "done":
+            break
+        time.sleep(0.05)
+    job = lf.get_job(jid)
+    assert job is not None
+    assert job.status == "done"
+    assert job.session_json == '{"ok": true}'
+
+
+def test_login_routes_reject_anonymous():
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+    main.settings.UPLOAD_SECRET = "test-secret"
+    client = TestClient(main.app)
+    assert client.get("/login").status_code == 200  # page itself is public
+    assert client.post("/login/start", json={"username": "u", "password": "p"}).status_code == 401
+    assert client.get("/login/status/x").status_code == 401
+    assert client.post("/login/code", json={"job_id": "x", "code": "1"}).status_code == 401
+    assert client.get("/login/session/x").status_code == 401
+
+
 # ---------- cleanup ----------
 
 def test_cleanup_removes_tmp_files():
