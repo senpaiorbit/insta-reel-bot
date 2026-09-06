@@ -130,7 +130,7 @@ def api_activity(token: str | None = None,
 def api_debug(token: str | None = None,
               authorization: str | None = Header(default=None),
               media_pk: str | None = None):
-    """Token-gated Instagram connectivity probe (shapes only, no media URLs)."""
+    """Token-gated Instagram probe. With media_pk: lean existence check only."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
     out: dict = {}
@@ -138,6 +138,26 @@ def api_debug(token: str | None = None,
         from app.instagram.client import create_client
         adapter = create_client(settings)
         out["auth"] = "ok"
+        # Lean verify mode: just the media check, no feed scraping.
+        if media_pk:
+            try:
+                getter = getattr(getattr(adapter._ig, "media", None), "get_info", None)
+                info = getter(media_pk) if callable(getter) else None
+                code = getattr(info, "code", None) if info is not None else None
+                if code is None and isinstance(info, dict):
+                    code = info.get("code")
+                out["media_verify"] = {
+                    "pk": media_pk,
+                    "exists": info is not None,
+                    "code": code,
+                }
+            except Exception as exc:
+                out["media_verify"] = {
+                    "pk": media_pk,
+                    "exists": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                }
+            return out
         try:
             me = adapter._ig.account.get_current_user()
             out["account"] = getattr(me, "username", None) or "unknown"
@@ -200,25 +220,6 @@ def api_debug(token: str | None = None,
         except Exception as exc:
             out["reel_shape"] = {
                 "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
-        # Verify a destination media pk actually exists/published.
-        if media_pk:
-            try:
-                getter = getattr(getattr(adapter._ig, "media", None), "get_info", None)
-                info = getter(media_pk) if callable(getter) else None
-                code = getattr(info, "code", None) if info is not None else None
-                if code is None and isinstance(info, dict):
-                    code = info.get("code")
-                out["media_verify"] = {
-                    "pk": media_pk,
-                    "exists": info is not None,
-                    "code": code,
-                }
-            except Exception as exc:
-                out["media_verify"] = {
-                    "pk": media_pk,
-                    "exists": False,
-                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
-                }
         who = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME or ""
         if who:
             try:
