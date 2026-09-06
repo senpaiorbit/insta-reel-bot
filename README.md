@@ -12,7 +12,7 @@ cleans `/tmp`.
 |---|---|
 | Import / client | `from instaharvest_v2 import Instagram`; `ig = Instagram.from_env()` / `Instagram()` |
 | Login / session | `ig.login(u, p)`, `ig.save_session()` / `ig.auth.save_session/load_session(path)`, `ig.auth.validate_session()`, `Instagram.from_session_file(path)` |
-| Challenge codes | `Instagram(challenge_callback=lambda ctype, contact: code)` — callback fires mid-login, returning the code resumes |
+| Challenge codes | `Instagram(challenge_callback=...)` fires mid-login for `ChallengeRequired`; `CheckpointRequired` carries no callback — resolved via `ChallengeHandler.resolve(session, challenge_url, csrf_token)` with email/SMS auto-selection |
 | Reels feed | `ig.feed.get_reels_feed(max_id=None)` → `dict` (paginate via `max_id`; **no** `count` kwarg — the adapter loops pages until `REEL_FETCH_COUNT`) |
 | NOT used | `get_timeline()` (home feed, not the Reels feed) |
 | Media fields | `Media.pk`, `Media.shortcode`, `media_type` (1 photo / 2 video / 8 carousel), `video_url`, `video_duration`; raw dicts use `pk`/`id`, `code`/`shortcode` |
@@ -25,24 +25,31 @@ cleans `/tmp`.
 ## Setup
 
 1. **GitHub**: this repo (`insta-reel-bot`).
-2. **Turso**: `turso db create reelbot` → get `libsql://…` URL + token. Tables auto-create on startup (idempotent `schema.sql`).
-3. **Instagram session**: open `https://<service>.onrender.com/login`, enter bot secret + IG credentials, complete any verification code, paste the resulting session JSON as `INSTAGRAM_SESSION`. (Alternative: browser cookies `SESSION_ID`/`CSRF_TOKEN`/`DS_USER_ID`.)
+2. **Turso**: create a DB in the dashboard (creates the default group) → get `libsql://…` URL + token. Tables auto-create on startup (idempotent `schema.sql`).
+3. **Instagram session** (no repeated logins): log in once in a browser, open DevTools → Application → Cookies, and copy `SESSION_ID`, `CSRF_TOKEN`, `DS_USER_ID` (plus `MID`, `IG_DID`, `DATR` for stability) into Render env. This cookie path is the reliable one — password logins from server IPs usually hit checkpoints.
 4. **Env vars on Render** (see `.env.example`): `INSTAGRAM_*`, `DESTINATION_USERNAME`, `TURSO_*`, `UPLOAD_SECRET`, `REEL_FETCH_COUNT=30`, `COVER_MODE`, `HIDE_LIKE_VIEW_COUNTS`, `LOG_LEVEL`.
 5. **Covers**: drop `.png/.jpg/.jpeg/.webp` files into `/cover/` (GitHub web UI → Add file → Upload files).
 6. **Deploy**: Render → New → Web Service → select repo. Build `pip install -r requirements.txt`, start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`, health check `/health`. Or push `render.yaml` (Blueprint).
-7. **UptimeRobot**: monitor type HTTP(s), URL `https://<service>.onrender.com/upload`, method POST, custom header `Authorization: Bearer <UPLOAD_SECRET>`. Interval ≥ your desired posting cadence (e.g. 60–300 min). Each hit uploads **at most one** reel (`MAX_UPLOADS_PER_RUN=1`).
-8. **Test**: `GET /health` → `{"status":"ok"}`; `POST /upload` with header → `success` / `no_new_reel` / `busy` / `failed`.
+7. **UptimeRobot**: monitor type HTTP(s), URL `https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>`, method POST. Interval ≥ your desired posting cadence (e.g. 60–300 min). Each hit uploads **at most one** reel (`MAX_UPLOADS_PER_RUN=1`).
+8. **Test**: `GET /health` → `{"status":"ok"}`; `POST /upload?token=<UPLOAD_SECRET>` → `success` / `no_new_reel` / `busy` / `failed`.
 
-## Web login helper (`GET /login`)
+## Simple auth + live log
 
-Generates a native instaharvest-v2 session without touching a terminal:
+All protected endpoints accept the secret two ways (use whichever is easier):
 
-1. Open `https://<service>.onrender.com/login` in your browser.
-2. Enter the **bot secret** (`UPLOAD_SECRET`), your IG **username**, IG **password** → connect.
-3. Watch the terminal pane. If Instagram sends a verification code, a CODE box appears — enter it.
-4. On success, copy the session JSON (or download `session.json`) and paste it as Render env var `INSTAGRAM_SESSION`.
+- Header: `Authorization: Bearer <UPLOAD_SECRET>`
+- Query: `POST /upload?token=<UPLOAD_SECRET>`
 
-Notes: passwords travel once over HTTPS and are never stored or logged; jobs live in memory only (30-min TTL). All `/login/*` API calls require the bot secret as a Bearer header (the page sends it for you). If Instagram demands in-app approval instead of a code, approve in the Instagram app and retry.
+UptimeRobot: use the query form as the monitor URL —
+`https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>`, method POST.
+
+Watch runs live in your browser: `https://<service>.onrender.com/live?token=<UPLOAD_SECRET>`
+shows the latest run counters plus a streaming activity tail
+(DISCOVERY → CLAIM → DOWNLOAD → COVER → UPLOAD → COMPLETED/FAILED).
+Raw JSON for dashboards: `GET /api/activity?token=<UPLOAD_SECRET>`.
+
+Note: a URL token can appear in access logs — fine for a personal bot,
+but don't share the bookmarked link publicly.
 
 ## Environment variables
 
@@ -51,11 +58,11 @@ Notes: passwords travel once over HTTPS and are never stored or logged; jobs liv
 | `INSTAGRAM_USERNAME` | for login | — | Source/destination login |
 | `INSTAGRAM_PASSWORD` | first login only | — | Avoid storing; prefer session |
 | `INSTAGRAM_SESSION` | ✅ (one of the session options) | — | session.json content, raw or base64 |
-| `SESSION_ID`/`CSRF_TOKEN`/`DS_USER_ID` | alt session | — | Browser cookies (`from_env`) |
+| `SESSION_ID`/`CSRF_TOKEN`/`DS_USER_ID` | ✅ (preferred) | — | Browser cookies (`from_env`) |
 | `DESTINATION_USERNAME` | ✅ | — | Account uniqueness scope |
 | `TURSO_DATABASE_URL` | ✅ | — | `libsql://…` |
 | `TURSO_AUTH_TOKEN` | ✅ | — | Turso token |
-| `UPLOAD_SECRET` | ✅ | — | Bearer secret for `/upload` and `/login/*` |
+| `UPLOAD_SECRET` | ✅ | — | Secret for `/upload` (header or `?token=`) and `/live` |
 | `REEL_FETCH_COUNT` | — | 30 | Candidates per run |
 | `MAX_UPLOADS_PER_RUN` | — | 1 | Always 1 in this design |
 | `STALE_CLAIM_TIMEOUT_SEC` | — | 1800 | Reclaim crashed PROCESSING rows |
@@ -86,11 +93,11 @@ If Instagram accepts the upload but the process dies before Turso marks `COMPLET
 
 ## Troubleshooting
 
-- `401 unauthorized` on `/upload` → wrong/missing `Authorization: Bearer` header.
+- `401 unauthorized` on `/upload` → wrong/missing secret (header or `?token=`).
 - `{"status":"busy"}` → overlapping tick; increase UptimeRobot interval.
 - `{"status":"no_new_reel"}` → whole batch already processed; normal.
-- `instagram_auth` → session expired; regenerate at `GET /login`.
-- `instagram_challenge/checkpoint` → verify in the Instagram app, then regenerate session via `/login`.
+- `instagram_auth` → session expired; refresh cookies in Render env (DevTools → Cookies).
+- `instagram_challenge/checkpoint` → cookie sessions avoid this; password logins from server IPs usually get challenged — approve in the Instagram app and refresh cookies.
 - `instagram_rate_limited` → widen UptimeRobot interval.
 - Turso errors → check URL/token; tables self-heal on next boot.
 - Render sleeping (Free) → first UptimeRobot hit wakes it; upload still runs.
