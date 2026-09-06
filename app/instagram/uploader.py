@@ -1,10 +1,9 @@
-"""Upload wrapper: transcode-aware Reel publishing + honest feature detection.
+"""Upload wrapper: transcode-aware Reel publishing + like-count hiding.
 
-Two things live here:
-
-1. HIDE_LIKE_VIEW_COUNTS: instaharvest-v2's ``post_reel()`` exposes no
-   like-count-hiding option. We log a clear warning and proceed visibly —
-   never claim otherwise.
+1. HIDE COUNTS (supported): Instagram's ``configure_to_clips`` accepts
+   ``like_and_view_counts_disabled=1`` (same wire parameter used by
+   instagrapi/goinsta/instagram4j for all media configure calls). We set it
+   on our own configure POST when requested.
 
 2. Transcode retries: ``post_reel()`` sleeps a fixed 3s between video upload
    and ``configure_to_clips``, which fails with "Transcode not finished yet"
@@ -21,19 +20,24 @@ import time
 
 log = logging.getLogger(__name__)
 
+HIDE_COUNTS_SUPPORTED = True  # via like_and_view_counts_disabled on configure
+
 # Configure retry schedule after "Transcode not finished yet" (seconds).
 CONFIGURE_RETRIES = (45, 90, 120, 180)
 
 
-def _configure(handle, upload_id: str, caption: str) -> dict:
+def _configure(handle, upload_id: str, caption: str, hide_counts: bool) -> dict:
+    data = {
+        "upload_id": upload_id,
+        "caption": caption,
+        "source_type": "4",
+        "clips_uses_original_audio": "1",
+    }
+    if hide_counts:
+        data["like_and_view_counts_disabled"] = "1"
     return handle._client.post(
         "/media/configure_to_clips/",
-        data={
-            "upload_id": upload_id,
-            "caption": caption,
-            "source_type": "4",
-            "clips_uses_original_audio": "1",
-        },
+        data=data,
         rate_category="post_default",
     )
 
@@ -41,10 +45,9 @@ def _configure(handle, upload_id: str, caption: str) -> dict:
 def upload_reel(adapter, *, video_path: str, cover_path: str | None,
                 caption: str, duration: float, hide_counts: bool) -> str:
     if hide_counts:
-        log.warning(
-            "HIDE_LIKE_VIEW_COUNTS requested but UNSUPPORTED by instaharvest-v2 "
-            "post_reel() — uploading with counts visible. See README 'Hidden counts'."
-        )
+        log.info("HIDE_COUNTS requested — setting like_and_view_counts_disabled=1")
+    else:
+        log.info("HIDE_COUNTS skipped (hide_like=0)")
     upload_api = adapter._ig.upload
     with open(video_path, "rb") as fh:
         video_data = fh.read()
@@ -70,7 +73,7 @@ def upload_reel(adapter, *, video_path: str, cover_path: str | None,
         time.sleep(wait)
         log.info("UPLOAD configure attempt=%d upload_id=%s", attempt + 1, upload_id)
         try:
-            result = _configure(upload_api, upload_id, caption or "")
+            result = _configure(upload_api, upload_id, caption or "", hide_counts)
         except Exception as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             log.warning("UPLOAD configure raised (attempt %d): %s", attempt + 1, last_err)
