@@ -55,17 +55,30 @@ def archive_candidates(db, *, destination_account: str = "",
          " AND completed_at IS NOT NULL AND completed_at != ''")
     args: list = []
     if only_pk:
+        # Explicit single-post targeting: the pk itself is globally unique,
+        # so the account/age gates add nothing — keep all other gates.
         q += " AND destination_media_id=?"
         args.append(only_pk)
     else:
         q += " AND completed_at < ?"
         args.append(older_than_iso)
-    if destination_account:
-        q += " AND destination_account=?"
-        args.append(destination_account)
+        if destination_account:
+            q += " AND destination_account=?"
+            args.append(destination_account)
     q += " ORDER BY completed_at ASC"
     rows = db.query_dicts(q, tuple(args))
     return [dict(r) for r in rows]
+
+
+def lookup_by_destination(db, destination_media_id: str) -> dict | None:
+    """Read-only lookup of one uploaded post's bookkeeping row (debug)."""
+    rows = db.query_dicts(
+        "SELECT source_media_id, source_shortcode, destination_account,"
+        " destination_media_id, status, completed_at, archived, archived_at"
+        " FROM processed_reels WHERE destination_media_id=? LIMIT 1",
+        (destination_media_id,),
+    )
+    return dict(rows[0]) if rows else None
 
 
 def mark_archived(db, source_media_id: str, destination_account: str) -> None:

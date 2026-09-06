@@ -75,7 +75,7 @@ def run_archive(*, settings, db, adapter,
             skipped.append({"destination_media_id": pk, "views": views,
                             "reason": "archive_failed", "error": err})
             continue
-        repo.mark_archived(db, src, dest)
+        repo.mark_archived(db, src, str(cand.get("destination_account") or dest))
         activity.emit(f"ARCHIVE done media={pk} ({views} views)")
         archived.append({"destination_media_id": pk, "views": views,
                          "source_media_id": src})
