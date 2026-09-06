@@ -118,6 +118,8 @@ def upload(authorization: str | None = Header(default=None)):
 class LoginStart(BaseModel):
     username: str
     password: str
+    email: str = ""  # Gmail for auto-verifying email checkpoints
+    app_password: str = ""  # Gmail app password (Google Account -> 2FA -> app passwords)
 
 
 class LoginCode(BaseModel):
@@ -137,7 +139,8 @@ def login_start(body: LoginStart, authorization: str | None = Header(default=Non
         raise HTTPException(status_code=401, detail="unauthorized")
     if not body.username or not body.password:
         raise HTTPException(status_code=400, detail="username and password required")
-    job_id = login_flow.start_job(body.username.strip(), body.password)
+    job_id = login_flow.start_job(body.username.strip(), body.password,
+                                    body.email.strip(), body.app_password)
     return {"job_id": job_id}
 
 
