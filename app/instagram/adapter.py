@@ -318,44 +318,62 @@ class InstagramAdapter:
         log.info("DISCOVERY found=%d usable=%d", len(items), len(out))
         return out
 
-    # -- video url resolution (trending items carry no video URL) ---------
+    # -- video url fallback ------------------------------------------------
     def ensure_video_url(self, cand: ReelCandidate) -> ReelCandidate:
         """Fill cand.video_url trying every known resolver. Never raises."""
+        from app import activity as _act
         if cand.video_url:
             return cand
+        _act.emit(f"RESOLVE start media_id={cand.source_media_id} "
+                  f"shortcode={cand.shortcode or '-'}")
+        log.info("RESOLVE start media_id=%s shortcode=%s",
+                 cand.source_media_id, cand.shortcode or "-")
         if not cand.shortcode:
+            _act.emit("RESOLVE abort: no shortcode")
             return cand
         # 1) authenticated media lookup (Media model carries video_url)
+        _act.emit("RESOLVE trying media.get_by_shortcode ...")
         try:
             media = self._ig.media.get_by_shortcode(cand.shortcode)
             url = _get(media, "video_url", default="")
+            _act.emit(f"RESOLVE media.get_by_shortcode done has_url={bool(url)}")
             if url:
                 cand.video_url = str(url)
                 return cand
         except Exception as exc:
+            _act.emit(f"RESOLVE media.get_by_shortcode failed: {type(exc).__name__}")
             log.warning("DISCOVERY media.get_by_shortcode failed for %s: %r",
                         cand.shortcode, exc)
         # 2) anonymous public lookup (no session needed)
+        _act.emit("RESOLVE trying public.get_post_by_shortcode ...")
         try:
             post = self._ig.public.get_post_by_shortcode(cand.shortcode)
             url = _get(post, "video_url", default="")
+            _act.emit(f"RESOLVE public lookup done has_url={bool(url)}")
             if url:
                 cand.video_url = str(url)
                 return cand
         except Exception as exc:
+            _act.emit(f"RESOLVE public lookup failed: {type(exc).__name__}")
             log.warning("DISCOVERY public lookup failed for %s: %r",
                         cand.shortcode, exc)
         # 3) media info by pk
+        _act.emit("RESOLVE trying media.get_info ...")
         try:
             getter = getattr(getattr(self._ig, "media", None), "get_info", None)
             if callable(getter) and cand.source_media_id:
                 media = getter(cand.source_media_id)
                 url = _get(media, "video_url", default="")
+                _act.emit(f"RESOLVE get_info done has_url={bool(url)}")
                 if url:
                     cand.video_url = str(url)
+            else:
+                _act.emit("RESOLVE get_info unavailable")
         except Exception as exc:
+            _act.emit(f"RESOLVE get_info failed: {type(exc).__name__}")
             log.warning("DISCOVERY media.get_info failed for %s: %r",
                         cand.source_media_id, exc)
+        _act.emit("RESOLVE exhausted: no video_url found")
         return cand
 
     # -- upload ------------------------------------------------------------
