@@ -163,6 +163,7 @@ def test_health_and_auth():
     main.settings.UPLOAD_SECRET = "test-secret"
     client = TestClient(main.app)
     assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/ping").json() == {"status": "ok"}
     r = client.post("/upload")
     assert r.status_code in (401, 403)
     r2 = client.post("/upload", headers={"Authorization": "Bearer wrong"})

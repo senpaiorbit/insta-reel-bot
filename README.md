@@ -1,10 +1,8 @@
 # Instagram Reel Automation Bot
 
-Production-ready Python service. UptimeRobot calls `POST /upload` → the bot
-pulls Instagram's dedicated Reels feed via **InstaHarvest v2**
-(`ig.feed.get_reels_feed()`), skips everything already recorded in **Turso**,
-uploads one new Reel with a custom cover from `/cover/`, records it, and
-cleans `/tmp`.
+Production-ready Python service. Two UptimeRobot monitors drive it: a
+5-minute `/ping` keep-alive (beats Render Free sleep) and a scheduled
+`/upload` that posts one new Reel per hit.
 
 ## Verified InstaHarvest v2 API surface (don't guess — this is checked)
 
@@ -29,7 +27,15 @@ cleans `/tmp`.
 4. **Env vars on Render** (see `.env.example`): `INSTAGRAM_*`, `DESTINATION_USERNAME`, `TURSO_*`, `UPLOAD_SECRET`, `REEL_FETCH_COUNT=30`, `COVER_MODE`, `HIDE_LIKE_VIEW_COUNTS=true`, `LOG_LEVEL`.
 5. **Covers**: drop `.png/.jpg/.jpeg/.webp` files into `/cover/` (GitHub web UI → Add file → Upload files).
 6. **Deploy**: Render → New → Web Service → select repo. Build `pip install -r requirements.txt`, start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`, health check `/health`. Or push `render.yaml` (Blueprint).
-7. **UptimeRobot**: monitor type HTTP(s), URL `https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>`, method GET or POST. Interval ≥ your desired posting cadence (e.g. 60–300 min). Each hit uploads **at most one** reel (`MAX_UPLOADS_PER_RUN=1`).
+7. **UptimeRobot — TWO monitors:**
+   - **Keep-alive** (beats Render Free's ~15 min sleep): HTTP(s), URL
+     `https://<service>.onrender.com/ping`, interval **5 minutes**.
+     Ultra-light: no DB, no Instagram, instant response.
+   - **Auto-upload** (your schedule): HTTP(s), URL
+     `https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>&hide_like=1`,
+     method GET or POST, interval per desired cadence (e.g. 120–300 min).
+     Each hit uploads **at most one** reel (`MAX_UPLOADS_PER_RUN=1`).
+   Keep them separate so wake-up pings never trigger uploads.
 8. **Test**: `GET /health` → `{"status":"ok"}`; `GET /upload?token=<UPLOAD_SECRET>` → `success` / `no_new_reel` / `busy` / `failed`.
 
 ## Simple auth + live log
@@ -105,7 +111,7 @@ If Instagram accepts the upload but the process dies before Turso marks `COMPLET
 - `instagram_challenge/checkpoint` → cookie sessions avoid this; password logins from server IPs usually get challenged — approve in the Instagram app and refresh cookies.
 - `instagram_rate_limited` → widen UptimeRobot interval.
 - Turso errors → check URL/token; tables self-heal on next boot.
-- Render sleeping (Free) → first UptimeRobot hit wakes it; upload still runs.
+- Render sleeping (Free) → the 5-min `/ping` monitor keeps it awake.
 - Invalid cover → check `/cover/` extensions and `COVER_FILE` path.
 
 ## Run tests
