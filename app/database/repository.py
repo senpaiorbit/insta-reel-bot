@@ -26,6 +26,47 @@ def init_schema(db) -> None:
     schema = SCHEMA_PATH.read_text()
     for stmt in [s.strip() for s in schema.split(";") if s.strip()]:
         db.execute(stmt)
+    # Migrate pre-existing DBs that were created before the archive columns.
+    for stmt in (
+        "ALTER TABLE processed_reels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE processed_reels ADD COLUMN archived_at TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_processed_archive"
+        " ON processed_reels(status, archived, completed_at)",
+    ):
+        try:
+            db.execute(stmt)
+        except Exception:
+            pass  # column/index already present
+
+
+def archive_candidates(db, *, destination_account: str = "",
+                       older_than_iso: str) -> list[dict]:
+    """COMPLETED uploads older than cutoff that were never archived.
+
+    Rows without a destination_media_id or completed_at are skipped —
+    archiving needs the live pk, and age is measured from completed_at.
+    """
+    rows = db.query_dicts(
+        "SELECT source_media_id, source_shortcode, destination_account,"
+        " destination_media_id, completed_at FROM processed_reels"
+        " WHERE status='COMPLETED' AND COALESCE(archived, 0)=0"
+        " AND destination_media_id IS NOT NULL AND destination_media_id != ''"
+        " AND completed_at IS NOT NULL AND completed_at != ''"
+        " AND completed_at < ?"
+        + (" AND destination_account=?" if destination_account else "")
+        + " ORDER BY completed_at ASC",
+        (older_than_iso,) + ((destination_account,) if destination_account else ()),
+    )
+    return [dict(r) for r in rows]
+
+
+def mark_archived(db, source_media_id: str, destination_account: str) -> None:
+    now = utcnow()
+    db.execute(
+        "UPDATE processed_reels SET archived=1, archived_at=?, updated_at=?"
+        " WHERE source_media_id=? AND destination_account=?",
+        (now, now, source_media_id, destination_account),
+    )
 
 
 # ---------------- processed_reels ----------------
@@ -92,7 +133,7 @@ def mark_status(db, source_media_id: str, destination_account: str, status: str,
     now = utcnow()
     if status == TERMINAL_OK:
         db.execute(
-            "UPDATE processed_reels SET status='COMPLETED', destination_media_id=?,"
+            "UPDATE processed_reels SET status='COMPLETED', destination_media_id=? ,"
             " last_error='', updated_at=?, completed_at=? WHERE source_media_id=?"
             " AND destination_account=?",
             (destination_media_id, now, now, source_media_id, destination_account),
