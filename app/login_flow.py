@@ -5,7 +5,8 @@ Two verification paths:
    mid-login, we park the job in ``awaiting_code``, the browser UI collects
    the code, the callback returns it.
 2. MANUAL CHECKPOINT: some logins raise ``CheckpointRequired`` instead of
-   invoking the callback. We then drive the library's real
+   invoking the callback. We hunt the challenge reference across the
+   exception payload, then drive the library's real
    ``ChallengeHandler.resolve()`` (verified against
    instaharvest_v2/challenge.py source) with a callback that parks the job
    the same way, so the emailed code can be entered in the UI.
@@ -14,8 +15,9 @@ On success the session is saved (instaharvest-v2 NATIVE format) and handed
 back for the INSTAGRAM_SESSION env var.
 
 Security: jobs live only in process memory with a 30-min TTL. Passwords and
-app-passwords are NEVER logged; references are dropped ASAP. All HTTP routes
-are Bearer-gated (see main.py).
+app-passwords are NEVER logged; references are dropped ASAP. Exception debug
+output logs attribute/key NAMES only, never values. All HTTP routes are
+Bearer-gated (see main.py).
 """
 
 from __future__ import annotations
@@ -126,6 +128,43 @@ def _is_challenge_exc(exc: BaseException) -> bool:
     return bool(names & CHALLENGE_EXC_NAMES)
 
 
+def _find_challenge_url(exc: BaseException) -> str:
+    """Hunt for a challenge URL across exception attrs and nested payloads."""
+    for attr in ("challenge_url", "url", "challenge_api_path", "api_path"):
+        val = getattr(exc, attr, "")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        for key in ("challenge_url", "url", "api_path"):
+            val = resp.get(key, "")
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        for key in ("challenge", "challenge_context", "step_data"):
+            nested = resp.get(key)
+            if isinstance(nested, dict):
+                for sub in ("url", "api_path"):
+                    val = nested.get(sub, "")
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
+    return ""
+
+
+def _log_exc_shape(job: LoginJob, exc: BaseException) -> None:
+    """Log exception structure (attribute/key NAMES only — never values)."""
+    try:
+        attrs = sorted(a for a in dir(exc) if not a.startswith("_"))[:25]
+        _push(job, f"debug: exc={type(exc).__name__} attrs={attrs}")
+        resp = getattr(exc, "response", None)
+        if isinstance(resp, dict):
+            shape = {k: type(v).__name__ for k, v in list(resp.items())[:15]}
+            _push(job, f"debug: response keys={shape}")
+        elif resp is not None:
+            _push(job, f"debug: response type={type(resp).__name__}")
+    except Exception:
+        pass
+
+
 def _probe_session_parts(ig: Any) -> tuple[Any, str, str]:
     """Best-effort extraction of (curl session, csrf, user-agent)."""
     cands = [getattr(ig, a, None) for a in ("_client", "client", "_session", "session")]
@@ -159,9 +198,10 @@ def _try_manual_checkpoint(job: LoginJob, exc: BaseException,
 
     Returns True when the challenge was resolved (caller: export session).
     """
-    url = (getattr(exc, "challenge_url", "") or getattr(exc, "url", "") or "")
+    _log_exc_shape(job, exc)
+    url = _find_challenge_url(exc)
     if not url:
-        _push(job, "no challenge URL attached to this error — cannot open manual flow.")
+        _push(job, "no challenge URL found on this error — cannot open manual flow.")
         return False
     try:
         try:
@@ -184,7 +224,7 @@ def _try_manual_checkpoint(job: LoginJob, exc: BaseException,
                    f"Enter it in the CODE box below.")
         return wait_for_code(ctype, contact)
 
-    _push(job, "opening manual verification (challenge page found) ...")
+    _push(job, "challenge reference found — opening manual verification ...")
     try:
         handler = ChallengeHandler(code_callback=manual_cb)
         result = handler.resolve(session=session, challenge_url=str(url),
