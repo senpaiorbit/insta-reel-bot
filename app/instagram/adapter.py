@@ -21,9 +21,10 @@ Verified against instaharvest-v2 1.1.x (mpython77/instaharvest_v2):
   exceptions    : ``instaharvest_v2.exceptions``: InstagramError, LoginRequired,
                   ChallengeRequired, CheckpointRequired, ConsentRequired,
                   RateLimitError, NotFoundError/MediaNotFound, NetworkError, ProxyError.
-  upstream bug  : installed GraphQL/users modules call bare
+  upstream bug  : installed GraphQL/users/client internals call bare
                   ``build_request_headers()`` without importing it (defined in
-                  ``instaharvest_v2.http_utils``). Patched at runtime, see
+                  ``instaharvest_v2.http_utils``). Patched at runtime for every
+                  loaded instaharvest_v2 module, see
                   ``patch_missing_library_imports()``.
 
 Everything else in the app uses the ReelCandidate dataclass below, never the
@@ -42,48 +43,64 @@ from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
-# Upstream bug (installed instaharvest-v2): the GraphQL and users modules
-# call bare ``build_request_headers(...)`` without importing it — the real
-# function lives in ``instaharvest_v2.http_utils`` (only client.py imports
-# it). Symptom: NameError on every GraphQL/users call, which feed methods
-# swallow into empty results. We inject the genuine function instead of
-# forking the library.
+# Upstream bug (installed instaharvest-v2): several modules call bare
+# ``build_request_headers(...)`` without importing it — the real function
+# lives in ``instaharvest_v2.http_utils``. Symptom: NameError on GraphQL /
+# users / client calls, which feed methods swallow into empty results.
+# Tracebacks implicated transport.py, users.py and client.py internals, and
+# the layout differs from GitHub main, so instead of guessing filenames we
+# pre-import every plausible submodule and inject the genuine function into
+# ALL loaded instaharvest_v2 modules that lack it (harmless where unused).
 _PATCH_CANDIDATES = (
     "instaharvest_v2.api.graphql",
     "instaharvest_v2.api.users",
+    "instaharvest_v2.api.transport",
+    "instaharvest_v2.api.feed",
+    "instaharvest_v2.api.account",
+    "instaharvest_v2.api.media",
     "instaharvest_v2.api.async_graphql",
     "instaharvest_v2.api.async_users",
     "instaharvest_v2.graphql",
     "instaharvest_v2.users",
+    "instaharvest_v2.transport",
+    "instaharvest_v2.feed",
+    "instaharvest_v2.account",
+    "instaharvest_v2.client",
 )
 
 
 def patch_missing_library_imports() -> int:
-    """Inject http_utils.build_request_headers into broken modules.
+    """Inject http_utils.build_request_headers everywhere it is missing.
 
     Returns number of modules patched. Never raises (no-op if the library
     is absent or already fixed upstream).
     """
     try:
         import importlib
+        import sys as _sys
         from instaharvest_v2 import http_utils
         func = http_utils.build_request_headers
     except Exception as exc:
         log.warning("COMPAT http_utils unavailable, skipping patches: %r", exc)
         return 0
-    patched = 0
     for mod_name in _PATCH_CANDIDATES:
         try:
-            mod = importlib.import_module(mod_name)
+            importlib.import_module(mod_name)
         except Exception:
             continue
-        if not hasattr(mod, "build_request_headers"):
+    patched = 0
+    for name, mod in list(_sys.modules.items()):
+        if name == "instaharvest_v2.http_utils":
+            continue
+        if name == "instaharvest_v2" or name.startswith("instaharvest_v2."):
             try:
-                setattr(mod, "build_request_headers", func)
-                patched += 1
-                log.info("COMPAT patched %s.build_request_headers", mod_name)
-            except Exception as exc:
-                log.warning("COMPAT patch refused for %s: %r", mod_name, exc)
+                if not hasattr(mod, "build_request_headers"):
+                    setattr(mod, "build_request_headers", func)
+                    patched += 1
+            except Exception:
+                continue
+    if patched:
+        log.info("COMPAT patched %d modules with build_request_headers", patched)
     return patched
 
 # Feature-detection results (honest reporting, never faked).
