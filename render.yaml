@@ -1,0 +1,33 @@
+# Render web service (Free plan compatible, no persistent disk).
+services:
+  - type: web
+    name: instagram-reel-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: INSTAGRAM_USERNAME
+        sync: false
+      - key: INSTAGRAM_SESSION
+        sync: false
+      - key: DESTINATION_USERNAME
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: UPLOAD_SECRET
+        generateValue: true
+      - key: REEL_FETCH_COUNT
+        value: 30
+      - key: COVER_MODE
+        value: random
+      - key: HIDE_LIKE_VIEW_COUNTS
+        value: true
+      - key: LOG_LEVEL
+        value: INFO

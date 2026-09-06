@@ -1,0 +1,9 @@
+.env
+session.json
+cookies.json
+*.db
+*.sqlite*
+__pycache__/
+/tmp/
+downloads/
+.venv/
