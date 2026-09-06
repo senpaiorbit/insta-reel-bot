@@ -12,40 +12,44 @@ cleans `/tmp`.
 |---|---|
 | Import / client | `from instaharvest_v2 import Instagram`; `ig = Instagram.from_env()` / `Instagram()` |
 | Login / session | `ig.login(u, p)`, `ig.save_session()` / `ig.auth.save_session/load_session(path)`, `ig.auth.validate_session()`, `Instagram.from_session_file(path)` |
-| Challenge codes | `Instagram(challenge_callback=...)` fires mid-login for `ChallengeRequired`; `CheckpointRequired` carries no callback — resolved via `ChallengeHandler.resolve(session, challenge_url, csrf_token)` with email/SMS auto-selection |
-| Reels feed | `ig.feed.get_reels_feed(max_id=None)` → `dict` (paginate via `max_id`; **no** `count` kwarg — the adapter loops pages until `REEL_FETCH_COUNT`) |
+| Reels feed | `ig.feed.get_reels_feed(count=20, cursor=None)` → `{posts, has_next, end_cursor, count}` — verified against installed source `api/feed.py` (the docs' `max_id` kwarg does NOT exist) |
 | NOT used | `get_timeline()` (home feed, not the Reels feed) |
-| Media fields | `Media.pk`, `Media.shortcode`, `media_type` (1 photo / 2 video / 8 carousel), `video_url`, `video_duration`; raw dicts use `pk`/`id`, `code`/`shortcode` |
-| Download | `ig.download.download_media(pk)`; fallback `ig.public.get_post_by_shortcode(code)` → `video_url` |
-| Upload | `ig.upload.post_reel(video_path\|video_data, thumbnail_path\|thumbnail_data, caption, duration, width, height)` → dict with media `pk` |
-| Cover | ✅ supported via `thumbnail_path` / `thumbnail_data` on `post_reel()` |
-| Hide like/view counts | ❌ **NOT supported** — `post_reel()` has no such parameter. If `HIDE_LIKE_VIEW_COUNTS=true`, the service logs a warning and uploads with counts visible. It never claims otherwise. |
+| Media fields | `Media` has NO `video_url` — video lives in `video_versions` / `best_video_url` (verified against installed `models/media.py`) |
+| Upload | `ig.upload.post_reel(...)` sleeps a fixed 3s before configure — too short; we replicate its exact steps with configure-only retries |
+| Hide counts | ✅ `like_and_view_counts_disabled=1` on `configure_to_clips` (same wire param as instagrapi/goinsta) |
+| Cover | ✅ supported via `thumbnail_path` on upload |
 | Exceptions | `instaharvest_v2.exceptions`: `InstagramError`, `LoginRequired`, `ChallengeRequired`, `CheckpointRequired`, `ConsentRequired`, `RateLimitError`, `NotFoundError`/`MediaNotFound`, `NetworkError`, `ProxyError` |
+| Upstream bug | installed GraphQL/users/client modules call bare `build_request_headers()` without importing it — patched at runtime from `http_utils` |
 
 ## Setup
 
 1. **GitHub**: this repo (`insta-reel-bot`).
 2. **Turso**: create a DB in the dashboard (creates the default group) → get `libsql://…` URL + token. Tables auto-create on startup (idempotent `schema.sql`).
-3. **Instagram session** (no repeated logins): log in once in a browser, open DevTools → Application → Cookies, and copy `SESSION_ID`, `CSRF_TOKEN`, `DS_USER_ID` (plus `MID`, `IG_DID`, `DATR` for stability) into Render env. This cookie path is the reliable one — password logins from server IPs usually hit checkpoints.
-4. **Env vars on Render** (see `.env.example`): `INSTAGRAM_*`, `DESTINATION_USERNAME`, `TURSO_*`, `UPLOAD_SECRET`, `REEL_FETCH_COUNT=30`, `COVER_MODE`, `HIDE_LIKE_VIEW_COUNTS`, `LOG_LEVEL`.
+3. **Instagram session**: log in once in a browser, open DevTools → Application → Cookies, and copy `SESSION_ID`, `CSRF_TOKEN`, `DS_USER_ID` (plus `MID`, `IG_DID`, `DATR`, `USER_AGENT` for stability) into Render env.
+4. **Env vars on Render** (see `.env.example`): `INSTAGRAM_*`, `DESTINATION_USERNAME`, `TURSO_*`, `UPLOAD_SECRET`, `REEL_FETCH_COUNT=30`, `COVER_MODE`, `HIDE_LIKE_VIEW_COUNTS=true`, `LOG_LEVEL`.
 5. **Covers**: drop `.png/.jpg/.jpeg/.webp` files into `/cover/` (GitHub web UI → Add file → Upload files).
 6. **Deploy**: Render → New → Web Service → select repo. Build `pip install -r requirements.txt`, start `uvicorn app.main:app --host 0.0.0.0 --port $PORT`, health check `/health`. Or push `render.yaml` (Blueprint).
-7. **UptimeRobot**: monitor type HTTP(s), URL `https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>`, method POST. Interval ≥ your desired posting cadence (e.g. 60–300 min). Each hit uploads **at most one** reel (`MAX_UPLOADS_PER_RUN=1`).
-8. **Test**: `GET /health` → `{"status":"ok"}`; `POST /upload?token=<UPLOAD_SECRET>` → `success` / `no_new_reel` / `busy` / `failed`.
+7. **UptimeRobot**: monitor type HTTP(s), URL `https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>`, method GET or POST. Interval ≥ your desired posting cadence (e.g. 60–300 min). Each hit uploads **at most one** reel (`MAX_UPLOADS_PER_RUN=1`).
+8. **Test**: `GET /health` → `{"status":"ok"}`; `GET /upload?token=<UPLOAD_SECRET>` → `success` / `no_new_reel` / `busy` / `failed`.
 
 ## Simple auth + live log
 
 All protected endpoints accept the secret two ways (use whichever is easier):
 
 - Header: `Authorization: Bearer <UPLOAD_SECRET>`
-- Query: `POST /upload?token=<UPLOAD_SECRET>`
+- Query: `/upload?token=<UPLOAD_SECRET>`
 
-UptimeRobot: use the query form as the monitor URL —
-`https://<service>.onrender.com/upload?token=<UPLOAD_SECRET>`, method POST.
+Hide like/view counts: automatic on every upload. Override per run with
+`&hide_like=0` (leave visible) or `&hide_like=1` (force hide).
+Full example: `/upload?token=<SECRET>&hide_like=1`.
+
+Captions: the source Reel's original caption is copied verbatim (up to 2200
+chars). If the source has no caption, `REEL_CAPTION` is used as a template
+(`{username}`, `{shortcode}`). The success response reports
+`"caption_copied": true/false` and `"like_hidden": true/false`.
 
 Watch runs live in your browser: `https://<service>.onrender.com/live?token=<UPLOAD_SECRET>`
-shows the latest run counters plus a streaming activity tail
-(DISCOVERY → CLAIM → DOWNLOAD → COVER → UPLOAD → COMPLETED/FAILED).
+shows the latest run counters plus a streaming activity tail.
 Raw JSON for dashboards: `GET /api/activity?token=<UPLOAD_SECRET>`.
 
 Note: a URL token can appear in access logs — fine for a personal bot,
@@ -57,20 +61,17 @@ but don't share the bookmarked link publicly.
 |---|---|---|---|
 | `INSTAGRAM_USERNAME` | for login | — | Source/destination login |
 | `INSTAGRAM_PASSWORD` | first login only | — | Avoid storing; prefer session |
-| `INSTAGRAM_SESSION` | ✅ (one of the session options) | — | session.json content, raw or base64 |
+| `INSTAGRAM_SESSION` | alt session | — | session.json content, raw or base64 |
 | `SESSION_ID`/`CSRF_TOKEN`/`DS_USER_ID` | ✅ (preferred) | — | Browser cookies (`from_env`) |
 | `DESTINATION_USERNAME` | ✅ | — | Account uniqueness scope |
 | `TURSO_DATABASE_URL` | ✅ | — | `libsql://…` |
 | `TURSO_AUTH_TOKEN` | ✅ | — | Turso token |
 | `UPLOAD_SECRET` | ✅ | — | Secret for `/upload` (header or `?token=`) and `/live` |
 | `REEL_FETCH_COUNT` | — | 30 | Candidates per run |
-| `MAX_UPLOADS_PER_RUN` | — | 1 | Always 1 in this design |
-| `STALE_CLAIM_TIMEOUT_SEC` | — | 1800 | Reclaim crashed PROCESSING rows |
-| `UPLOAD_LOCK_TIMEOUT_SEC` | — | 600 | Distributed lock TTL |
+| `HIDE_LIKE_VIEW_COUNTS` | — | true | Default for hiding counts; `hide_like` overrides per run |
 | `COVER_MODE` | — | random | `random`/`sequential`/`fixed` |
 | `COVER_FILE` | for fixed | — | e.g. `cover/1.png` |
-| `HIDE_LIKE_VIEW_COUNTS` | — | true | Requested but **unsupported by library** → warning |
-| `REEL_CAPTION` | — | 🎬 via @{username} #reels | `{username}`, `{shortcode}` placeholders |
+| `REEL_CAPTION` | — | 🎬 via @{username} #reels | Fallback template when source has no caption |
 | `LOG_LEVEL` | — | INFO | — |
 
 ## Database & deduplication
@@ -83,9 +84,13 @@ but don't share the bookmarked link publicly.
 - Covers are repo assets; never modified. Any conversion would happen in `/tmp` only.
 - Missing dir / invalid file → run fails safely with `failed`, nothing uploaded.
 
-## Hidden counts — honest limitation
+## Hidden counts — supported via configure param
 
-`instaharvest-v2`'s `post_reel()` exposes no like-count-hiding option, and there is no separate supported endpoint in the installed version. The uploader (`app/instagram/uploader.py`) therefore logs `HIDE_LIKE_VIEW_COUNTS requested but UNSUPPORTED…` and proceeds visibly. To support it later, add an adapter in `uploader.py` — never fake the flag.
+`instaharvest-v2`'s `post_reel()` exposes no like-count-hiding option, so the
+uploader performs the publish itself and sets
+`like_and_view_counts_disabled=1` on `configure_to_clips` (verified wire
+parameter, same as instagrapi/goinsta use). Counts are hidden by default;
+pass `hide_like=0` to skip. The success response reports `"like_hidden"`.
 
 ## Crash-safety edge case
 

@@ -230,6 +230,30 @@ def test_authorized_helper():
     assert not main._authorized("Bearer wrong", "also-wrong")
 
 
+def test_parse_hide_like_defaults_on():
+    import app.main as main
+    main.settings.UPLOAD_SECRET = "test-secret"
+    assert main.parse_hide_like(None, True) is True
+    assert main.parse_hide_like("", True) is True
+    assert main.parse_hide_like("1", True) is True
+    assert main.parse_hide_like("0", True) is False
+    assert main.parse_hide_like("false", False) is False
+    assert main.parse_hide_like("0", False) is False
+
+
+def test_resolve_caption_prefers_original():
+    from app.instagram.adapter import ReelCandidate
+    from app.worker import resolve_caption
+    pick = ReelCandidate(source_media_id="1", shortcode="ABC", username="u",
+                         caption_text="  hello #reels  ")
+    caption, copied = resolve_caption(pick, "🎬 via @{username}")
+    assert caption == "hello #reels" and copied is True
+    empty = ReelCandidate(source_media_id="2", shortcode="XYZ", username="sam",
+                          caption_text="   ")
+    caption2, copied2 = resolve_caption(empty, "🎬 via @{username} {shortcode}")
+    assert caption2 == "🎬 via @sam XYZ" and copied2 is False
+
+
 def test_compat_patch_never_raises_without_library():
     # instaharvest-v2 is not installed here (Termux) — patch must no-op.
     from app.instagram import adapter
