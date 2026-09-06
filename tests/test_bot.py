@@ -138,6 +138,22 @@ def test_normalize_missing_id_returns_none():
     assert normalize_reel({"code": "XYZ"}) is None
 
 
+def test_best_video_url_prefers_widest():
+    from app.instagram.adapter import _best_video_url
+
+    class FakeVer:
+        def __init__(self, w, u):
+            self.width = w
+            self.url = u
+
+    class FakeMedia:
+        video_versions = [FakeVer(640, "http://v/lo.mp4"), FakeVer(1080, "http://v/hi.mp4")]
+
+    assert _best_video_url(FakeMedia()) == "http://v/hi.mp4"
+    assert _best_video_url({"video_url": "http://v/direct.mp4"}) == "http://v/direct.mp4"
+    assert _best_video_url({}) == ""
+
+
 # ---------- API ----------
 
 def test_health_and_auth():
