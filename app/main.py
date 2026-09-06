@@ -173,11 +173,30 @@ def api_debug(token: str | None = None,
                     "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                     "tb": _tb()}
         # Reel item key-shape (names + types only — no URLs/ids/values).
+        # Plus per-shortcode detail probes to find the video URL field.
         try:
             raw = adapter._ig.feed.get_reels_feed(count=3)
             posts = raw.get("posts", raw.get("items", [])) if isinstance(raw, dict) else []
             if posts:
                 out["reel_shape"] = _shape(posts[0])
+                code = posts[0].get("shortcode") or posts[0].get("code") or ""
+                if code:
+                    for pname, pcall in (
+                        ("media_by_shortcode",
+                         lambda: adapter._ig.media.get_by_shortcode(code)),
+                        ("public_by_shortcode",
+                         lambda: adapter._ig.public.get_post_by_shortcode(code)),
+                    ):
+                        try:
+                            detail = pcall()
+                            det = detail.to_dict() if hasattr(detail, "to_dict") else detail
+                            keys = sorted(det.keys())[:30] if isinstance(det, dict) else []
+                            has_video = bool(
+                                (det.get("video_url") if isinstance(det, dict) else ""))
+                            out[pname] = {"keys": keys, "has_video_url": has_video}
+                        except Exception as exc:
+                            out[pname] = {
+                                "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
             else:
                 out["reel_shape"] = {"empty": True}
         except Exception as exc:
