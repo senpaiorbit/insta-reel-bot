@@ -14,9 +14,12 @@ CREATE TABLE IF NOT EXISTS processed_reels (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     completed_at TEXT,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT,
     UNIQUE(source_media_id, destination_account)
 );
 CREATE INDEX IF NOT EXISTS idx_processed_status ON processed_reels(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_processed_archive ON processed_reels(status, archived, completed_at);
 
 CREATE TABLE IF NOT EXISTS bot_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

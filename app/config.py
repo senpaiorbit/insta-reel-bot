@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     HIDE_LIKE_VIEW_COUNTS: bool = True  # honored only if library supports it (it doesn't)
     REEL_CAPTION: str = "🎬 via @{username} #reels"
 
+    # Auto-archive (/archive hit every 24h): reels older than this, with
+    # fewer views than this, get archived (owner-only, reversible in-app).
+    ARCHIVE_MIN_AGE_HR: int = 24
+    ARCHIVE_MAX_VIEWS: int = 900
+
     LOG_LEVEL: str = "INFO"
     BASE_DIR: str = str(Path(__file__).resolve().parent.parent)
 
