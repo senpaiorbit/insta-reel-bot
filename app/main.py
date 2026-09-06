@@ -138,11 +138,21 @@ def api_activity(token: str | None = None,
 @app.get("/api/debug")
 def api_debug(token: str | None = None,
               authorization: str | None = Header(default=None),
-              media_pk: str | None = None):
-    """Token-gated Instagram probe. With media_pk: lean existence check only."""
+              media_pk: str | None = None,
+              db_lookup: str | None = None):
+    """Token-gated Instagram probe. With media_pk: lean existence check only.
+    With db_lookup=<destination_media_id>: our own bookkeeping row for that
+    uploaded post (status/completed_at/archived) — no Instagram call."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
     out: dict = {}
+    if db_lookup:
+        try:
+            row = repo.lookup_by_destination(get_db(), db_lookup)
+            out["db_row"] = row if row is not None else {"found": False}
+        except Exception as exc:
+            out["db_row"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        return out
     try:
         from app.instagram.client import create_client
         adapter = create_client(settings)
