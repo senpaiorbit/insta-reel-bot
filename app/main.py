@@ -88,6 +88,13 @@ def _authorized(authorization: str | None = None, token: str | None = None) -> b
     return False
 
 
+def parse_hide_like(value: str | None, default: bool) -> bool:
+    """Parse ?hide_like=. Absent -> default (auto-hide ON)."""
+    if value is None or value == "":
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
 @app.get("/")
 @app.get("/health")
 def health():
@@ -138,7 +145,6 @@ def api_debug(token: str | None = None,
         from app.instagram.client import create_client
         adapter = create_client(settings)
         out["auth"] = "ok"
-        # Lean verify mode: just the media check, no feed scraping.
         if media_pk:
             try:
                 getter = getattr(getattr(adapter._ig, "media", None), "get_info", None)
@@ -241,11 +247,13 @@ def api_debug(token: str | None = None,
 
 @app.api_route("/upload", methods=["GET", "POST"])
 def upload(token: str | None = None,
+           hide_like: str | None = None,
            authorization: str | None = Header(default=None)):
-    """Trigger one upload cycle. GET exists so the URL works from a browser
-    address bar; POST for UptimeRobot/monitors."""
+    """Trigger one upload cycle. GET works from a browser address bar.
+    hide_like: 1 (default) hides like/view counts, 0 leaves them visible."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
+    hide = parse_hide_like(hide_like, settings.HIDE_LIKE_VIEW_COUNTS)
     if _thread_lock.locked():
         activity.emit("BUSY — overlapping /upload call rejected")
         return JSONResponse({"status": "busy"}, status_code=429)
@@ -265,11 +273,12 @@ def upload(token: str | None = None,
             pass
         return JSONResponse({"status": "busy"}, status_code=429)
     try:
-        activity.emit("UPLOAD request accepted — starting pipeline")
+        activity.emit(f"UPLOAD request accepted — starting pipeline (hide_like={int(hide)})")
         from app.instagram.client import create_client
         from app.worker import run_once
         adapter = create_client(settings)
-        result = run_once(settings=settings, db=db, adapter=adapter)
+        result = run_once(settings=settings, db=db, adapter=adapter,
+                          hide_counts=hide)
         code = 200 if result.get("status") in ("success", "no_new_reel") else 500
         return JSONResponse(result, status_code=code)
     finally:
