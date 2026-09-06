@@ -247,6 +247,62 @@ def api_debug(token: str | None = None,
     return out
 
 
+@app.api_route("/archive", methods=["GET", "POST"])
+def archive(token: str | None = None,
+            min_age_hr: int | None = None,
+            max_views: int | None = None,
+            authorization: str | None = Header(default=None)):
+    """One auto-archive pass. GET works from a browser; hit every 24h.
+
+    Archives COMPLETED uploads older than min_age_hr (default 24) whose
+    live view count is below max_views (default 900). Unknown view counts
+    are skipped, never archived.
+    """
+    if not _authorized(authorization, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    age = min_age_hr if min_age_hr is not None else settings.ARCHIVE_MIN_AGE_HR
+    views = max_views if max_views is not None else settings.ARCHIVE_MAX_VIEWS
+    if _thread_lock.locked():
+        activity.emit("BUSY — overlapping /archive call rejected")
+        return JSONResponse({"status": "busy"}, status_code=429)
+    db = get_db()
+    try:
+        if not repo.acquire_lock(db, key="archive_lock",
+                                 ttl_sec=settings.UPLOAD_LOCK_TIMEOUT_SEC):
+            activity.emit("BUSY — archive lock held, rejecting")
+            return JSONResponse({"status": "busy"}, status_code=429)
+    except Exception as exc:
+        log.error("ARCHIVE lock acquire failed: %r", exc)
+        return JSONResponse({"status": "failed", "error": "lock_unavailable"},
+                            status_code=503)
+    if not _thread_lock.acquire(blocking=False):
+        try:
+            repo.release_lock(db, key="archive_lock")
+        except Exception:
+            pass
+        return JSONResponse({"status": "busy"}, status_code=429)
+    try:
+        activity.emit("ARCHIVE request accepted — starting pass")
+        from app.archiver import run_archive
+        from app.instagram.client import create_client
+        adapter = create_client(settings)
+        result = run_archive(settings=settings, db=db, adapter=adapter,
+                             min_age_hr=age, max_views=views)
+        return JSONResponse(result, status_code=200)
+    except Exception as exc:
+        log.error("ARCHIVE pass crashed: %r", exc)
+        activity.emit(f"ARCHIVE pass crashed: {type(exc).__name__}")
+        return JSONResponse({"status": "failed",
+                             "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                            status_code=500)
+    finally:
+        _thread_lock.release()
+        try:
+            repo.release_lock(db, key="archive_lock")
+        except Exception:
+            pass
+
+
 @app.api_route("/upload", methods=["GET", "POST"])
 def upload(token: str | None = None,
            hide_like: str | None = None,
