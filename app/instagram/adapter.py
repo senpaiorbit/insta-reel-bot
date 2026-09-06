@@ -21,6 +21,10 @@ Verified against instaharvest-v2 1.1.x (mpython77/instaharvest_v2):
   exceptions    : ``instaharvest_v2.exceptions``: InstagramError, LoginRequired,
                   ChallengeRequired, CheckpointRequired, ConsentRequired,
                   RateLimitError, NotFoundError/MediaNotFound, NetworkError, ProxyError.
+  upstream bug  : installed GraphQL/users modules call bare
+                  ``build_request_headers()`` without importing it (defined in
+                  ``instaharvest_v2.http_utils``). Patched at runtime, see
+                  ``patch_missing_library_imports()``.
 
 Everything else in the app uses the ReelCandidate dataclass below, never the
 library's internals — so the client can be swapped later.
@@ -37,6 +41,50 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
+
+# Upstream bug (installed instaharvest-v2): the GraphQL and users modules
+# call bare ``build_request_headers(...)`` without importing it — the real
+# function lives in ``instaharvest_v2.http_utils`` (only client.py imports
+# it). Symptom: NameError on every GraphQL/users call, which feed methods
+# swallow into empty results. We inject the genuine function instead of
+# forking the library.
+_PATCH_CANDIDATES = (
+    "instaharvest_v2.api.graphql",
+    "instaharvest_v2.api.users",
+    "instaharvest_v2.api.async_graphql",
+    "instaharvest_v2.api.async_users",
+    "instaharvest_v2.graphql",
+    "instaharvest_v2.users",
+)
+
+
+def patch_missing_library_imports() -> int:
+    """Inject http_utils.build_request_headers into broken modules.
+
+    Returns number of modules patched. Never raises (no-op if the library
+    is absent or already fixed upstream).
+    """
+    try:
+        import importlib
+        from instaharvest_v2 import http_utils
+        func = http_utils.build_request_headers
+    except Exception as exc:
+        log.warning("COMPAT http_utils unavailable, skipping patches: %r", exc)
+        return 0
+    patched = 0
+    for mod_name in _PATCH_CANDIDATES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if not hasattr(mod, "build_request_headers"):
+            try:
+                setattr(mod, "build_request_headers", func)
+                patched += 1
+                log.info("COMPAT patched %s.build_request_headers", mod_name)
+            except Exception as exc:
+                log.warning("COMPAT patch refused for %s: %r", mod_name, exc)
+    return patched
 
 # Feature-detection results (honest reporting, never faked).
 SUPPORTS_HIDDEN_COUNTS = False  # verified: post_reel() has no such parameter
@@ -134,6 +182,7 @@ class InstagramAdapter:
                 "instaharvest-v2 is not installed. "
                 "Add 'instaharvest-v2' to requirements.txt and deploy to Render."
             ) from exc
+        patch_missing_library_imports()
         return Instagram()
 
     def load_session(self, *, username: str = "", password: str = "",
