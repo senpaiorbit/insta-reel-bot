@@ -113,16 +113,16 @@ def _cand(mid, code="ABC", user="u", mtype=2, url="http://v/x.mp4"):
 
 def test_filter_skips_duplicates_but_continues():
     cands = [_cand("A"), _cand("B"), _cand("C")]
-    pick, stats = filter_candidates(
+    eligible, stats = filter_candidates(
         cands, already_done=lambda m: m in {"A", "B"})
-    assert pick is not None and pick.source_media_id == "C"
+    assert [c.source_media_id for c in eligible] == ["C"]
     assert stats["skipped"] == 2
 
 
 def test_filter_all_duplicates_returns_none():
     cands = [_cand("A"), _cand("B"), _cand("A"), _cand("B")]
-    pick, _ = filter_candidates(cands, already_done=lambda m: True)
-    assert pick is None
+    eligible, _ = filter_candidates(cands, already_done=lambda m: True)
+    assert eligible == []
 
 
 def test_normalize_raw_rest_payload():
