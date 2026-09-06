@@ -104,6 +104,40 @@ def api_activity(token: str | None = None,
             "service_time": time.strftime("%H:%M:%S")}
 
 
+@app.get("/api/debug")
+def api_debug(token: str | None = None,
+              authorization: str | None = Header(default=None)):
+    """Token-gated Instagram connectivity probe (shapes only, no media URLs)."""
+    if not _authorized(authorization, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    out: dict = {}
+    try:
+        from app.instagram.client import create_client
+        adapter = create_client(settings)
+        out["auth"] = "ok"
+        try:
+            me = adapter._ig.account.get_current_user()
+            out["account"] = getattr(me, "username", None) or "unknown"
+        except Exception as exc:
+            out["account"] = f"unreadable: {type(exc).__name__}"
+        try:
+            raw = adapter._ig.feed.get_reels_feed(count=5)
+            if isinstance(raw, dict):
+                posts = raw.get("posts", raw.get("items", []))
+                out["reels_feed"] = {
+                    "keys": sorted(raw.keys())[:15],
+                    "posts": len(posts),
+                    "has_next": raw.get("has_next", raw.get("more_available")),
+                }
+            else:
+                out["reels_feed"] = {"type": type(raw).__name__}
+        except Exception as exc:
+            out["reels_feed"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    except Exception as exc:
+        out["auth"] = f"failed: {type(exc).__name__}: {str(exc)[:300]}"
+    return out
+
+
 @app.api_route("/upload", methods=["GET", "POST"])
 def upload(token: str | None = None,
            authorization: str | None = Header(default=None)):
