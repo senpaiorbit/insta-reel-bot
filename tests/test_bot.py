@@ -273,3 +273,105 @@ def test_cleanup_removes_tmp_files():
     downloader.cleanup(fh.name)
     assert not Path(fh.name).exists()
     downloader.cleanup("/tmp/does-not-exist-xyz.mp4")  # must not raise
+
+
+# ---------- auto-archive ----------
+
+def _seed_completed(db, src, dest_pk, completed_at, archived=0):
+    db.execute(
+        "INSERT INTO processed_reels (source_media_id, destination_account,"
+        " destination_media_id, status, completed_at, archived)"
+        " VALUES (?, 'dest', ?, 'COMPLETED', ?, ?)",
+        (src, dest_pk, completed_at, archived),
+    )
+
+
+def test_archive_columns_exist_after_init(db):
+    cols = {r["name"] for r in db.query_dicts("PRAGMA table_info(processed_reels)", ())}
+    assert {"archived", "archived_at"} <= cols
+
+
+def test_archive_candidates_age_and_flag(db):
+    _seed_completed(db, "old", "pk-old", "2020-01-01T00:00:00+00:00")
+    _seed_completed(db, "new", "pk-new", "2999-01-01T00:00:00+00:00")
+    _seed_completed(db, "done", "pk-done", "2020-01-01T00:00:00+00:00", archived=1)
+    cands = repo.archive_candidates(db, destination_account="dest",
+                                    older_than_iso="2021-01-01T00:00:00+00:00")
+    assert [c["source_media_id"] for c in cands] == ["old"]
+
+
+def test_archive_candidates_skip_missing_pk_or_date(db):
+    db.execute(
+        "INSERT INTO processed_reels (source_media_id, destination_account,"
+        " status, completed_at) VALUES ('nopk', 'dest', 'COMPLETED',"
+        " '2020-01-01T00:00:00+00:00')", ())
+    cands = repo.archive_candidates(db, destination_account="dest",
+                                    older_than_iso="2021-01-01T00:00:00+00:00")
+    assert cands == []
+
+
+def test_mark_archived_hides_from_candidates(db):
+    _seed_completed(db, "s1", "pk-1", "2020-01-01T00:00:00+00:00")
+    repo.mark_archived(db, "s1", "dest")
+    cands = repo.archive_candidates(db, destination_account="dest",
+                                    older_than_iso="2021-01-01T00:00:00+00:00")
+    assert cands == []
+
+
+class _FakeArchiveAdapter:
+    def __init__(self, views):
+        self._views = views
+        self.archived_pks: list = []
+
+    def get_media_views(self, pk):
+        return self._views.get(pk)
+
+    def archive_media(self, pk):
+        self.archived_pks.append(pk)
+        return True
+
+
+def _archive_settings():
+    from types import SimpleNamespace
+    return SimpleNamespace(DESTINATION_USERNAME="dest", INSTAGRAM_USERNAME="")
+
+
+def test_run_archive_below_threshold(db):
+    from app.archiver import run_archive
+    _seed_completed(db, "s1", "pk-1", "2020-01-01T00:00:00+00:00")
+    res = run_archive(settings=_archive_settings(), db=db,
+                      adapter=_FakeArchiveAdapter({"pk-1": 100}),
+                      min_age_hr=24, max_views=900)
+    assert res["status"] == "ok" and res["archived_count"] == 1
+    assert res["archived"][0]["destination_media_id"] == "pk-1"
+
+
+def test_run_archive_skips_popular_and_unknown(db):
+    from app.archiver import run_archive
+    _seed_completed(db, "s2", "pk-2", "2020-01-01T00:00:00+00:00")
+    _seed_completed(db, "s3", "pk-3", "2020-01-01T00:00:00+00:00")
+    res = run_archive(settings=_archive_settings(), db=db,
+                      adapter=_FakeArchiveAdapter({"pk-2": 5000}),
+                      min_age_hr=24, max_views=900)
+    assert res["archived_count"] == 0 and len(res["skipped"]) == 2
+    reasons = {s["reason"] for s in res["skipped"]}
+    assert reasons == {"popular_enough", "views_unknown"}
+
+
+def test_run_archive_boundary_keeps_at_threshold(db):
+    from app.archiver import run_archive
+    _seed_completed(db, "s4", "pk-4", "2020-01-01T00:00:00+00:00")
+    res = run_archive(settings=_archive_settings(), db=db,
+                      adapter=_FakeArchiveAdapter({"pk-4": 900}),
+                      min_age_hr=24, max_views=900)
+    assert res["archived_count"] == 0  # >= threshold stays public
+
+
+def test_archive_route_auth():
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+    main.settings.UPLOAD_SECRET = "test-secret"
+    client = TestClient(main.app)
+    assert client.get("/archive").status_code == 401
+    assert client.get("/archive?token=wrong").status_code == 401
