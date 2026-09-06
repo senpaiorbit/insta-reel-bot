@@ -65,6 +65,18 @@ def _tb() -> list[str]:
     return out
 
 
+def _shape(obj: object, depth: int = 0) -> object:
+    """Key-shape of nested data: key names + value type names only."""
+    if isinstance(obj, dict):
+        if depth > 1:
+            return {"keys": sorted(obj.keys())[:20]}
+        return {k: _shape(v, depth + 1) for k, v in list(obj.items())[:25]}
+    if isinstance(obj, list):
+        return {"list_len": len(obj),
+                "item": _shape(obj[0], depth + 1) if obj else None}
+    return type(obj).__name__
+
+
 def _authorized(authorization: str | None = None, token: str | None = None) -> bool:
     """Bearer header OR ?token= query param (simple UptimeRobot/browser use)."""
     if authorization and authorization.startswith("Bearer "):
@@ -160,6 +172,17 @@ def api_debug(token: str | None = None,
                 out["graphql_reels"] = {
                     "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                     "tb": _tb()}
+        # Reel item key-shape (names + types only — no URLs/ids/values).
+        try:
+            raw = adapter._ig.feed.get_reels_feed(count=3)
+            posts = raw.get("posts", raw.get("items", [])) if isinstance(raw, dict) else []
+            if posts:
+                out["reel_shape"] = _shape(posts[0])
+            else:
+                out["reel_shape"] = {"empty": True}
+        except Exception as exc:
+            out["reel_shape"] = {
+                "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
         who = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME or ""
         if who:
             try:
