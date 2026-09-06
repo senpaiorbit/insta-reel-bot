@@ -1,5 +1,9 @@
 -- Turso / libSQL schema. Applied idempotently on startup.
 -- Deduplication key: UNIQUE(source_media_id, destination_account).
+-- NOTE: the idx_processed_archive index is NOT created here: on a
+-- pre-existing table without the archive columns it would fail and abort
+-- init_schema before the migration below runs. repository.init_schema()
+-- adds the columns first, then creates the index.
 
 CREATE TABLE IF NOT EXISTS processed_reels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,7 +23,6 @@ CREATE TABLE IF NOT EXISTS processed_reels (
     UNIQUE(source_media_id, destination_account)
 );
 CREATE INDEX IF NOT EXISTS idx_processed_status ON processed_reels(status, updated_at);
-CREATE INDEX IF NOT EXISTS idx_processed_archive ON processed_reels(status, archived, completed_at);
 
 CREATE TABLE IF NOT EXISTS bot_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
