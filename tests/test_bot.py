@@ -441,3 +441,31 @@ def test_only_pk_ignores_account_and_age(db):
     sched = repo.archive_candidates(db, destination_account="dest",
                                     older_than_iso="2021-01-01T00:00:00+00:00")
     assert all(c["destination_media_id"] != "pk-x" for c in sched)
+
+
+def test_only_pk_untracked_manual_post_archives(db):
+    from app.archiver import run_archive
+    adapter = _FakeArchiveAdapter({"pk-manual": 6})
+    res = run_archive(settings=_archive_settings(), db=db, adapter=adapter,
+                      min_age_hr=24, max_views=900, only_pk="pk-manual")
+    assert res["checked"] == 1 and res["archived_count"] == 1
+    assert adapter.archived_pks == ["pk-manual"]
+    assert res["archived"][0]["untracked"] is True
+
+
+def test_only_pk_untracked_popular_stays(db):
+    from app.archiver import run_archive
+    adapter = _FakeArchiveAdapter({"pk-manual": 5000})
+    res = run_archive(settings=_archive_settings(), db=db, adapter=adapter,
+                      min_age_hr=24, max_views=900, only_pk="pk-manual")
+    assert res["archived_count"] == 0 and adapter.archived_pks == []
+    assert res["skipped"][0]["reason"] == "popular_enough"
+
+
+def test_only_pk_untracked_unknown_views_skipped(db):
+    from app.archiver import run_archive
+    adapter = _FakeArchiveAdapter({})
+    res = run_archive(settings=_archive_settings(), db=db, adapter=adapter,
+                      min_age_hr=24, max_views=900, only_pk="pk-manual")
+    assert res["archived_count"] == 0 and adapter.archived_pks == []
+    assert res["skipped"][0]["reason"] == "views_unknown"
