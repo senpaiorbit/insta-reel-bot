@@ -1,4 +1,4 @@
-"""FastAPI service: /health, /status, POST /upload (UptimeRobot), /live activity."""
+"""FastAPI service: /health, /status, /upload, /live activity, /api/debug."""
 
 from __future__ import annotations
 
@@ -128,7 +128,8 @@ def api_activity(token: str | None = None,
 
 @app.get("/api/debug")
 def api_debug(token: str | None = None,
-              authorization: str | None = Header(default=None)):
+              authorization: str | None = Header(default=None),
+              media_pk: str | None = None):
     """Token-gated Instagram connectivity probe (shapes only, no media URLs)."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -159,7 +160,6 @@ def api_debug(token: str | None = None,
                     out[name] = {"type": type(raw).__name__}
             except Exception as exc:
                 out[name] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-        # Direct (unmasked) probes: feed methods swallow errors into empties.
         gql = getattr(adapter._ig, "graphql", None)
         if gql is None:
             out["graphql_layer"] = "missing"
@@ -172,8 +172,6 @@ def api_debug(token: str | None = None,
                 out["graphql_reels"] = {
                     "error": f"{type(exc).__name__}: {str(exc)[:300]}",
                     "tb": _tb()}
-        # Reel item key-shape (names + types only — no URLs/ids/values).
-        # Plus per-shortcode detail probes to find the video URL field.
         try:
             raw = adapter._ig.feed.get_reels_feed(count=3)
             posts = raw.get("posts", raw.get("items", [])) if isinstance(raw, dict) else []
@@ -202,6 +200,25 @@ def api_debug(token: str | None = None,
         except Exception as exc:
             out["reel_shape"] = {
                 "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        # Verify a destination media pk actually exists/published.
+        if media_pk:
+            try:
+                getter = getattr(getattr(adapter._ig, "media", None), "get_info", None)
+                info = getter(media_pk) if callable(getter) else None
+                code = getattr(info, "code", None) if info is not None else None
+                if code is None and isinstance(info, dict):
+                    code = info.get("code")
+                out["media_verify"] = {
+                    "pk": media_pk,
+                    "exists": info is not None,
+                    "code": code,
+                }
+            except Exception as exc:
+                out["media_verify"] = {
+                    "pk": media_pk,
+                    "exists": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                }
         who = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME or ""
         if who:
             try:
@@ -232,7 +249,6 @@ def upload(token: str | None = None,
         activity.emit("BUSY — overlapping /upload call rejected")
         return JSONResponse({"status": "busy"}, status_code=429)
     db = get_db()
-    # Database-level distributed lock (mandatory for multi-instance).
     try:
         if not repo.acquire_lock(db, ttl_sec=settings.UPLOAD_LOCK_TIMEOUT_SEC):
             activity.emit("BUSY — distributed lock held, rejecting")
