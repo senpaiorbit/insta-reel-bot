@@ -1,15 +1,21 @@
 """Interactive login jobs powering the GET /login web helper.
 
-Flow: start_job(username, password) -> background thread runs
-``ig.login()`` with a ``challenge_callback``. When Instagram demands a
-verification code, the callback parks the job in ``awaiting_code`` and the
-browser UI collects the code via POST /login/code. On success the session is
-saved (instaharvest-v2 NATIVE format) and its content is handed back so it can
-be pasted into the INSTAGRAM_SESSION env var.
+Two verification paths:
+1. AUTO: ``ig.login()`` with ``challenge_callback`` — the library pauses
+   mid-login, we park the job in ``awaiting_code``, the browser UI collects
+   the code, the callback returns it.
+2. MANUAL CHECKPOINT: some logins raise ``CheckpointRequired`` instead of
+   invoking the callback. We then drive the library's real
+   ``ChallengeHandler.resolve()`` (verified against
+   instaharvest_v2/challenge.py source) with a callback that parks the job
+   the same way, so the emailed code can be entered in the UI.
 
-Security: jobs live only in process memory with a 30-min TTL. Usernames are
-logged, passwords NEVER are — the password reference is dropped as soon as the
-login call is issued. All HTTP routes are Bearer-gated (see main.py).
+On success the session is saved (instaharvest-v2 NATIVE format) and handed
+back for the INSTAGRAM_SESSION env var.
+
+Security: jobs live only in process memory with a 30-min TTL. Passwords and
+app-passwords are NEVER logged; references are dropped ASAP. All HTTP routes
+are Bearer-gated (see main.py).
 """
 
 from __future__ import annotations
@@ -19,13 +25,17 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
 JOB_TTL_SEC = 1800
 CODE_TIMEOUT_SEC = 600
 MAX_LOG_LINES = 500
+CHALLENGE_EXC_NAMES = frozenset({
+    "ChallengeRequired", "CheckpointRequired", "ChallengeError",
+    "CheckpointError", "VerificationRequired",
+})
 
 
 @dataclass
@@ -39,6 +49,7 @@ class LoginJob:
     account_username: str = ""
     error: str = ""
     created_at: float = field(default_factory=time.time)
+    _ig: Any = None
     _code: str | None = None
     _code_event: threading.Event = field(default_factory=threading.Event)
 
@@ -92,55 +103,104 @@ def submit_code(job_id: str, code: str) -> bool:
 
 
 def _perform_login(job: LoginJob, username: str, password: str,
-                   code_callback: Callable[[str, str], str],
+                   code_callback: Callable[..., str],
                    email_creds: tuple[str, str] | None = None):
     """Library interaction, isolated for testability. Returns ig client."""
     from instaharvest_v2 import Instagram
 
     _push(job, "creating Instagram client ...")
     ig = Instagram(challenge_callback=code_callback)
+    job._ig = ig
     _push(job, f"logging in as @{username} ...")
     if email_creds:
-        _push(job, "email auto-verify enabled (code will be read from Gmail) ...")
+        _push(job, "gmail credentials provided: yes — library will auto-read the code ...")
         ig.login(username, password, email_credentials=email_creds)
     else:
+        _push(job, "gmail credentials provided: no (manual code entry only) ...")
         ig.login(username, password)
     return ig
 
 
-def _run(job: LoginJob, username: str, password: str,
-         email: str = "", app_password: str = "") -> None:
-    def code_callback(challenge_type: str = "", contact_point: str = "") -> str:
-        job.challenge_type = str(challenge_type or "")
-        job.contact_point = str(contact_point or "")
-        job.status = "awaiting_code"
-        _push(job, f"Instagram needs verification ({job.challenge_type or 'code'}). "
-                   f"Code sent to: {job.contact_point or 'your email/phone'}. "
-                   f"Enter it in the CODE box below.")
-        job._code_event.clear()
-        ok = job._code_event.wait(timeout=CODE_TIMEOUT_SEC)
-        if not ok or not job._code:
-            raise TimeoutError("No verification code provided in time (10 min).")
-        return job._code
+def _is_challenge_exc(exc: BaseException) -> bool:
+    names = {type(exc).__name__} | {c.__name__ for c in type(exc).__mro__}
+    return bool(names & CHALLENGE_EXC_NAMES)
 
+
+def _probe_session_parts(ig: Any) -> tuple[Any, str, str]:
+    """Best-effort extraction of (curl session, csrf, user-agent)."""
+    cands = [getattr(ig, a, None) for a in ("_client", "client", "_session", "session")]
+    cands.append(ig)
+    session = next((c for c in cands if c is not None
+                    and hasattr(c, "get") and hasattr(c, "post")), None)
+    csrf = ""
+    for obj in (cands[0], cands[1], ig):
+        for attr in ("csrf_token", "csrf", "_csrf_token"):
+            val = getattr(obj, attr, "") if obj is not None else ""
+            if val:
+                csrf = str(val)
+                break
+        if csrf:
+            break
+    ua = ""
+    for obj in (cands[0], cands[1], ig):
+        for attr in ("user_agent", "useragent", "_user_agent"):
+            val = getattr(obj, attr, "") if obj is not None else ""
+            if val:
+                ua = str(val)
+                break
+        if ua:
+            break
+    return session, csrf, ua
+
+
+def _try_manual_checkpoint(job: LoginJob, exc: BaseException,
+                           wait_for_code: Callable[[str, str], str]) -> bool:
+    """Drive ChallengeHandler.resolve() for checkpoint-style failures.
+
+    Returns True when the challenge was resolved (caller: export session).
+    """
+    url = (getattr(exc, "challenge_url", "") or getattr(exc, "url", "") or "")
+    if not url:
+        _push(job, "no challenge URL attached to this error — cannot open manual flow.")
+        return False
     try:
-        _push(job, "job started.")
-        creds = (email, app_password) if email and app_password else None
-        ig = _perform_login(job, username, password, code_callback, creds)
-    except Exception as exc:
-        from app.instagram.adapter import InstagramAdapter
-        kind = InstagramAdapter.classify_error(exc)
-        job.status = "failed"
-        job.error = f"{kind}: {exc}"
-        _push(job, f"FAILED [{kind}]: {exc}")
-        _push(job, "Tip: wrong password, expired challenge, or Instagram wants "
-                   "in-app approval (open the Instagram app and try again).")
-        return
-    finally:
-        password = ""  # noqa: F841 - drop credential references ASAP
-        app_password = ""  # noqa: F841
-        del password, app_password
+        try:
+            from instaharvest_v2.challenge import ChallengeHandler
+        except ImportError:
+            from instaharvest_v2 import ChallengeHandler  # type: ignore[no-redef]
+    except ImportError:
+        _push(job, "ChallengeHandler not available in this library version.")
+        return False
+    session, csrf, ua = _probe_session_parts(job._ig)
+    if session is None:
+        _push(job, "could not access the client's HTTP session — cannot open manual flow.")
+        return False
 
+    def manual_cb(ctx: Any) -> str:
+        ctype = str(getattr(ctx, "challenge_type", "") or "")
+        contact = str(getattr(ctx, "contact_point", "") or "")
+        _push(job, f"challenge opened (type={ctype or 'verification'}). "
+                   f"Code sent to: {contact or 'your email/phone'}. "
+                   f"Enter it in the CODE box below.")
+        return wait_for_code(ctype, contact)
+
+    _push(job, "opening manual verification (challenge page found) ...")
+    try:
+        handler = ChallengeHandler(code_callback=manual_cb)
+        result = handler.resolve(session=session, challenge_url=str(url),
+                                 csrf_token=csrf, user_agent=ua)
+    except Exception as e:
+        _push(job, f"manual verification error: {e}")
+        return False
+    if getattr(result, "success", False):
+        _push(job, "manual verification accepted by Instagram.")
+        return True
+    _push(job, f"manual verification rejected: {getattr(result, 'message', result)}")
+    return False
+
+
+def _export_session(job: LoginJob, ig: Any) -> bool:
+    """Validate + save session from an authenticated client. Returns ok."""
     try:
         _push(job, "login accepted, validating session ...")
         validator = getattr(getattr(ig, "auth", ig), "validate_session", None)
@@ -169,7 +229,55 @@ def _run(job: LoginJob, username: str, password: str,
         job.status = "done"
         _push(job, "DONE — copy the session JSON below into Render env var INSTAGRAM_SESSION, "
                    "then POST /upload to test.")
+        return True
     except Exception as exc:
         job.status = "failed"
         job.error = str(exc)[:500]
         _push(job, f"FAILED while exporting session: {exc}")
+        return False
+
+
+def _run(job: LoginJob, username: str, password: str,
+         email: str = "", app_password: str = "") -> None:
+    def park_and_wait(challenge_type: str = "", contact_point: str = "") -> str:
+        job.challenge_type = str(challenge_type or "")
+        job.contact_point = str(contact_point or "")
+        job.status = "awaiting_code"
+        job._code_event.clear()
+        ok = job._code_event.wait(timeout=CODE_TIMEOUT_SEC)
+        if not ok or not job._code:
+            raise TimeoutError("No verification code provided in time (10 min).")
+        return job._code
+
+    def code_callback(challenge_type: str = "", contact_point: str = "") -> str:
+        _push(job, f"Instagram needs verification ({challenge_type or 'code'}). "
+                   f"Code sent to: {contact_point or 'your email/phone'}. "
+                   f"Enter it in the CODE box below.")
+        return park_and_wait(challenge_type, contact_point)
+
+    try:
+        _push(job, "job started.")
+        creds = (email, app_password) if email and app_password else None
+        ig = _perform_login(job, username, password, code_callback, creds)
+    except Exception as exc:
+        from app.instagram.adapter import InstagramAdapter
+        kind = InstagramAdapter.classify_error(exc)
+        # Checkpoint-style failure: open the MANUAL code flow (same CODE box).
+        if _is_challenge_exc(exc) and job._ig is not None:
+            _push(job, f"checkpoint hit [{kind}]: {exc}")
+            if _try_manual_checkpoint(job, exc, park_and_wait):
+                _export_session(job, job._ig)
+                return
+        job.status = "failed"
+        job.error = f"{kind}: {exc}"
+        _push(job, f"FAILED [{kind}]: {exc}")
+        _push(job, "Tip: hard-refresh the /login page (Ctrl+Shift+R) so the Gmail "
+                   "fields appear, fill Gmail + app password, and retry. "
+                   "Or approve the login in the Instagram app and retry.")
+        return
+    finally:
+        password = ""  # noqa: F841 - drop credential references ASAP
+        app_password = ""  # noqa: F841
+        del password, app_password
+
+    _export_session(job, ig)
