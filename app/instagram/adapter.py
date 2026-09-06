@@ -7,6 +7,11 @@ Verified against installed instaharvest-v2 source (not just docs):
                ``video_versions`` / ``best_video_url``. See _best_video_url().
   upload     : ``ig.upload.post_reel(video_path, thumbnail_path, caption,
                duration, width, height)`` -> dict with media pk.
+  views      : ``ig.media.get_info(pk)`` -> Media with play_count/view_count.
+  archive    : MediaAPI has NO archive method (checked 1.1.x) — archiving
+               goes through its HttpClient directly: POST
+               media/{id}/only_me/ (same private endpoint instagrapi and
+               instagram_private_api's media_only_me() use).
   upstream bug: installed GraphQL/users/client internals call bare
                ``build_request_headers()`` — patched at runtime, see
                ``patch_missing_library_imports()``.
@@ -398,6 +403,61 @@ class InstagramAdapter:
             raise RuntimeError(f"Upload returned no media pk: {str(result)[:300]}")
         log.info("UPLOAD success destination_media_id=%s", pk)
         return pk
+
+    # -- archive (low-performing reels) ------------------------------------
+    def get_media_views(self, media_pk: str) -> int | None:
+        """Live play/view count for one media pk. None when unreadable.
+
+        Never raises — unknown counts must skip archiving, never trigger it.
+        """
+        try:
+            getter = getattr(getattr(self._ig, "media", None), "get_info", None)
+            if not callable(getter):
+                log.warning("ARCHIVE get_info unavailable, cannot read views for %s", media_pk)
+                return None
+            info = getter(media_pk)
+            for name in ("play_count", "view_count"):
+                val = _get(info, name, default=None)
+                if val is not None and val != "":
+                    try:
+                        return int(val)
+                    except (TypeError, ValueError):
+                        continue
+            log.warning("ARCHIVE no view count on media %s", media_pk)
+            return None
+        except Exception as exc:
+            log.warning("ARCHIVE get_info failed for %s: %r", media_pk, exc)
+            return None
+
+    def archive_media(self, media_pk: str) -> bool:
+        """Archive one media (owner-only). Returns True on success.
+
+        Wire protocol (instagram_private_api media_only_me, same private API
+        instagrapi uses): POST media/{id}/only_me/ with media_id + media_type.
+        instaharvest-v2's MediaAPI has no archive method (checked 1.1.x), so
+        the call goes through its HttpClient directly. Raises on failure so
+        the caller can record per-media errors.
+        """
+        media_api = getattr(self._ig, "media", None)
+        direct = getattr(media_api, "archive", None)
+        if callable(direct):
+            direct(media_pk)
+            log.info("ARCHIVE ok media=%s via media.archive", media_pk)
+            return True
+        client = getattr(media_api, "_client", None)
+        post = getattr(client, "post", None)
+        if not callable(post):
+            raise RuntimeError("Instagram client exposes no media API to archive with")
+        res = post(
+            f"/media/{media_pk}/only_me/",
+            data={"media_id": str(media_pk)},
+            params={"media_type": 2},  # reels are video
+            rate_category="post_default",
+        )
+        if isinstance(res, dict) and res.get("status") not in (None, "ok"):
+            raise RuntimeError(f"Archive rejected: {str(res)[:200]}")
+        log.info("ARCHIVE ok media=%s", media_pk)
+        return True
 
     # -- error classification ----------------------------------------------
     @staticmethod
