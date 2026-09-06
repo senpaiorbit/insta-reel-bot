@@ -251,12 +251,16 @@ def api_debug(token: str | None = None,
 def archive(token: str | None = None,
             min_age_hr: int | None = None,
             max_views: int | None = None,
+            only_pk: str | None = None,
+            dry_run: int | None = None,
             authorization: str | None = Header(default=None)):
     """One auto-archive pass. GET works from a browser; hit every 24h.
 
     Archives COMPLETED uploads older than min_age_hr (default 24) whose
     live view count is below max_views (default 900). Unknown view counts
-    are skipped, never archived.
+    are skipped, never archived. only_pk targets one destination media id
+    (bypasses the age cutoff, keeps all other gates). dry_run=1 reports
+    what would happen without archiving anything.
     """
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -287,7 +291,8 @@ def archive(token: str | None = None,
         from app.instagram.client import create_client
         adapter = create_client(settings)
         result = run_archive(settings=settings, db=db, adapter=adapter,
-                             min_age_hr=age, max_views=views)
+                             min_age_hr=age, max_views=views,
+                             dry_run=bool(dry_run), only_pk=only_pk or "")
         return JSONResponse(result, status_code=200)
     except Exception as exc:
         log.error("ARCHIVE pass crashed: %r", exc)
