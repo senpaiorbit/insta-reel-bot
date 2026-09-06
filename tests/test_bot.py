@@ -201,6 +201,8 @@ def test_live_and_activity_auth():
     assert client.get("/live").status_code == 200  # page shell is public
     assert client.get("/api/activity").status_code == 401
     assert client.get("/api/activity?token=wrong").status_code == 401
+    assert client.get("/api/debug").status_code == 401
+    assert client.get("/api/debug?token=wrong").status_code == 401
 
 
 def test_authorized_helper():
