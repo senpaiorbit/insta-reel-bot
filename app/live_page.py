@@ -21,8 +21,8 @@ LIVE_HTML = """<!DOCTYPE html>
 <h1>$ reelbot live <span class="dim" id="sub">— connecting…</span></h1>
 <div class="card"><div class="dim">latest run</div><div id="run" class="stat">…</div></div>
 <div class="card"><div class="dim">activity</div><div id="term">$ waiting…</div></div>
-<div class="card dim">Tip: trigger a run with <span class="stat">POST /upload?token=YOUR_SECRET</span>
-— watch it here live. Bookmark this URL (token included) for one-click access.</div>
+<div class="card dim">Tip: trigger a run by opening <span class="stat">/upload?token=YOUR_SECRET</span>
+in a new tab — watch it here live. Bookmark both URLs (token included) for one-click access.</div>
 </div>
 <script>
 const token=new URLSearchParams(location.search).get('token')||'';

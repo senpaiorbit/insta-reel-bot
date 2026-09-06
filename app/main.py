@@ -104,9 +104,11 @@ def api_activity(token: str | None = None,
             "service_time": time.strftime("%H:%M:%S")}
 
 
-@app.post("/upload")
+@app.api_route("/upload", methods=["GET", "POST"])
 def upload(token: str | None = None,
            authorization: str | None = Header(default=None)):
+    """Trigger one upload cycle. GET exists so the URL works from a browser
+    address bar; POST for UptimeRobot/monitors."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
     if _thread_lock.locked():
