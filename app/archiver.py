@@ -4,7 +4,8 @@ view count is below max_views get archived (owner-only, reversible).
 One /archive hit = one pass over all eligible rows. Thresholds come from
 query params (defaults from Settings) so UptimeRobot needs no config.
 only_pk targets a single destination media id (bypasses the age cutoff,
-keeps every other gate). dry_run reports without archiving anything.
+keeps every other gate; also works for manual posts with no DB row —
+nothing is written to the DB then). dry_run reports without archiving.
 """
 
 from __future__ import annotations
@@ -37,6 +38,13 @@ def run_archive(*, settings, db, adapter,
 
     candidates = repo.archive_candidates(
         db, destination_account=dest, older_than_iso=cutoff, only_pk=only_pk)
+    if only_pk and not candidates:
+        # Explicit owner request for a post the bot never tracked (manual
+        # upload): still honor it, subject to the same live views gate.
+        # Nothing is written to the DB — there is no row to mark.
+        candidates = [{"destination_media_id": only_pk, "source_media_id": "",
+                       "destination_account": dest, "completed_at": "",
+                       "untracked": True}]
     tag = "DRY-RUN" if dry_run else "ARCHIVE"
     activity.emit(f"{tag} pass start: {len(candidates)} candidate(s)"
                   f" older than {min_age_hr}h, threshold {max_views} views")
@@ -64,7 +72,8 @@ def run_archive(*, settings, db, adapter,
         if dry_run:
             activity.emit(f"DRY-RUN would archive media={pk} ({views} views)")
             would_archive.append({"destination_media_id": pk, "views": views,
-                                  "source_media_id": src})
+                                  "source_media_id": src,
+                                  "untracked": bool(cand.get("untracked"))})
             continue
         try:
             adapter.archive_media(pk)
@@ -75,10 +84,12 @@ def run_archive(*, settings, db, adapter,
             skipped.append({"destination_media_id": pk, "views": views,
                             "reason": "archive_failed", "error": err})
             continue
-        repo.mark_archived(db, src, str(cand.get("destination_account") or dest))
+        if not cand.get("untracked"):
+            repo.mark_archived(db, src, str(cand.get("destination_account") or dest))
         activity.emit(f"ARCHIVE done media={pk} ({views} views)")
         archived.append({"destination_media_id": pk, "views": views,
-                         "source_media_id": src})
+                         "source_media_id": src,
+                         "untracked": bool(cand.get("untracked"))})
         time.sleep(2)  # gentle pace between archive calls
 
     elapsed = round(time.time() - started, 1)
