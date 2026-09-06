@@ -11,7 +11,8 @@ Verified against installed instaharvest-v2 source (not just docs):
   archive    : MediaAPI has NO archive method (checked 1.1.x) — archiving
                goes through its HttpClient directly: POST
                media/{id}/only_me/ (same private endpoint instagrapi and
-               instagram_private_api's media_only_me() use).
+               instagram_private_api's media_only_me() use). Three request
+               shapes are tried; first {"status":"ok"} wins.
   upstream bug: installed GraphQL/users/client internals call bare
                ``build_request_headers()`` — patched at runtime, see
                ``patch_missing_library_imports()``.
@@ -435,8 +436,10 @@ class InstagramAdapter:
         Wire protocol (instagram_private_api media_only_me, same private API
         instagrapi uses): POST media/{id}/only_me/ with media_id + media_type.
         instaharvest-v2's MediaAPI has no archive method (checked 1.1.x), so
-        the call goes through its HttpClient directly. Raises on failure so
-        the caller can record per-media errors.
+        the call goes through its HttpClient directly. Tries three shapes
+        (query vs body placement of media_type) because Instagram answers
+        some shapes with a login redirect; first {"status":"ok"} wins.
+        Raises on failure so the caller can record per-media errors.
         """
         media_api = getattr(self._ig, "media", None)
         direct = getattr(media_api, "archive", None)
@@ -448,16 +451,31 @@ class InstagramAdapter:
         post = getattr(client, "post", None)
         if not callable(post):
             raise RuntimeError("Instagram client exposes no media API to archive with")
-        res = post(
-            f"/media/{media_pk}/only_me/",
-            data={"media_id": str(media_pk)},
-            params={"media_type": 2},  # reels are video
-            rate_category="post_default",
+        shapes = (
+            ({"media_id": str(media_pk)}, {"media_type": 2}),
+            ({"media_id": str(media_pk)}, None),
+            ({"media_id": str(media_pk), "media_type": "2"}, None),
         )
-        if isinstance(res, dict) and res.get("status") not in (None, "ok"):
-            raise RuntimeError(f"Archive rejected: {str(res)[:200]}")
-        log.info("ARCHIVE ok media=%s", media_pk)
-        return True
+        last_err = "no archive attempt made"
+        for i, (data, params) in enumerate(shapes):
+            try:
+                kwargs: dict[str, Any] = {"data": data,
+                                          "rate_category": "post_default"}
+                if params:
+                    kwargs["params"] = params
+                res = post(f"/media/{media_pk}/only_me/", **kwargs)
+            except Exception as exc:
+                last_err = f"shape{i}: {type(exc).__name__}: {str(exc)[:150]}"
+                log.warning("ARCHIVE shape%d raised media=%s: %r", i, media_pk, exc)
+                continue
+            status = res.get("status") if isinstance(res, dict) else None
+            if status in (None, "ok"):
+                log.info("ARCHIVE ok media=%s shape%d", media_pk, i)
+                return True
+            last_err = f"shape{i}: {str(res)[:150]}"
+            log.warning("ARCHIVE shape%d rejected media=%s: %s", i, media_pk,
+                        str(res)[:150])
+        raise RuntimeError(f"Archive rejected: {last_err}")
 
     # -- error classification ----------------------------------------------
     @staticmethod
