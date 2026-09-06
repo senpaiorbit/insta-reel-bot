@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import secrets
+import sys
 import threading
 import time
+import traceback
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
@@ -53,6 +55,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Instagram Reel Bot", lifespan=lifespan)
+
+
+def _tb() -> list[str]:
+    """Traceback footprints (filenames + lines only, no values/secrets)."""
+    out = []
+    for frame in traceback.extract_tb(sys.exc_info()[2])[-4:]:
+        out.append(f"{frame.filename.split('/')[-1]}:{frame.lineno}:{frame.name}")
+    return out
 
 
 def _authorized(authorization: str | None = None, token: str | None = None) -> bool:
@@ -148,7 +158,8 @@ def api_debug(token: str | None = None,
                 out["graphql_reels"] = {"posts": len(posts)}
             except Exception as exc:
                 out["graphql_reels"] = {
-                    "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    "tb": _tb()}
         who = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME or ""
         if who:
             try:
@@ -159,7 +170,8 @@ def api_debug(token: str | None = None,
                 }
             except Exception as exc:
                 out["self_profile"] = {
-                    "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    "tb": _tb()}
         else:
             out["self_profile"] = {"skipped": "no username configured"}
     except Exception as exc:
