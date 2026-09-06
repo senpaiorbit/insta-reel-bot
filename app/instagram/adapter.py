@@ -13,6 +13,8 @@ Verified against instaharvest-v2 1.1.x (mpython77/instaharvest_v2):
                   feed — NOT used.
   media model   : Media.{pk, shortcode, media_type(1/2/8), video_url, video_duration, ...}
                   raw feed dicts use ``pk``/``id``, ``code``/``shortcode``.
+                  Trending items carry NO video URL — resolve per shortcode via
+                  media.get_by_shortcode / public.get_post_by_shortcode / get_info.
   upload        : ``ig.upload.post_reel(video_path|video_data, thumbnail_path|
                   thumbnail_data, caption, duration, width, height)`` -> dict with
                   media pk. NO hide-like-counts parameter exists.
@@ -316,17 +318,44 @@ class InstagramAdapter:
         log.info("DISCOVERY found=%d usable=%d", len(items), len(out))
         return out
 
-    # -- video url fallback ------------------------------------------------
+    # -- video url resolution (trending items carry no video URL) ---------
     def ensure_video_url(self, cand: ReelCandidate) -> ReelCandidate:
-        if cand.video_url or not cand.shortcode:
+        """Fill cand.video_url trying every known resolver. Never raises."""
+        if cand.video_url:
             return cand
+        if not cand.shortcode:
+            return cand
+        # 1) authenticated media lookup (Media model carries video_url)
+        try:
+            media = self._ig.media.get_by_shortcode(cand.shortcode)
+            url = _get(media, "video_url", default="")
+            if url:
+                cand.video_url = str(url)
+                return cand
+        except Exception as exc:
+            log.warning("DISCOVERY media.get_by_shortcode failed for %s: %r",
+                        cand.shortcode, exc)
+        # 2) anonymous public lookup (no session needed)
         try:
             post = self._ig.public.get_post_by_shortcode(cand.shortcode)
             url = _get(post, "video_url", default="")
             if url:
                 cand.video_url = str(url)
+                return cand
         except Exception as exc:
-            log.warning("DISCOVERY no video_url for %s: %r", cand.shortcode, exc)
+            log.warning("DISCOVERY public lookup failed for %s: %r",
+                        cand.shortcode, exc)
+        # 3) media info by pk
+        try:
+            getter = getattr(getattr(self._ig, "media", None), "get_info", None)
+            if callable(getter) and cand.source_media_id:
+                media = getter(cand.source_media_id)
+                url = _get(media, "video_url", default="")
+                if url:
+                    cand.video_url = str(url)
+        except Exception as exc:
+            log.warning("DISCOVERY media.get_info failed for %s: %r",
+                        cand.source_media_id, exc)
         return cand
 
     # -- upload ------------------------------------------------------------
@@ -366,13 +395,17 @@ class InstagramAdapter:
             "CheckpointRequired": "instagram_checkpoint",
             "ConsentRequired": "instagram_consent",
             "RateLimitError": "instagram_rate_limited",
+            "NetworkError": "network",
+            "ProxyError": "proxy",
+        }
+        # NotFoundError/MediaNotFound/UserNotFound/PrivateAccountError handled below
+        extra = {
             "NotFoundError": "instagram_not_found",
             "MediaNotFound": "instagram_not_found",
             "UserNotFound": "instagram_not_found",
             "PrivateAccountError": "instagram_private",
-            "NetworkError": "network",
-            "ProxyError": "proxy",
         }
+        mapping.update(extra)
         return mapping.get(name, "unknown")
 
 
