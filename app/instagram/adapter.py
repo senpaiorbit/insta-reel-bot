@@ -194,7 +194,12 @@ class InstagramAdapter:
             try:
                 ok = validator()
                 if ok is False:
-                    raise RuntimeError("Instagram session validation returned False")
+                    # Some sessions validate False on one endpoint (new IP,
+                    # pending checkpoint) yet still work for feed/upload.
+                    # Proceed — the feed call is the real test and its
+                    # LoginRequired error is classified + reported cleanly.
+                    log.warning("AUTH validate_session returned False; proceeding "
+                                "anyway, feed will confirm")
             except RuntimeError:
                 raise
             except Exception as exc:
@@ -213,8 +218,9 @@ class InstagramAdapter:
         while len(items) < count and seen_pages < 10:
             page = self._ig.feed.get_reels_feed(max_id=max_id)
             batch = page.get("items", page.get("posts", [])) if isinstance(page, dict) else []
-            if not batch and hasattr(page, "items"):
-                batch = page.items  # type: ignore[union-attr]
+            if not batch and hasattr(page, "items") and not isinstance(page, dict):
+                items_attr = page.items  # type: ignore[union-attr]
+                batch = items_attr if isinstance(items_attr, list) else []
             if not batch:
                 break
             items.extend(batch)
