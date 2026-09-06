@@ -61,12 +61,14 @@ def _purge() -> None:
         _jobs.pop(jid, None)
 
 
-def start_job(username: str, password: str) -> str:
+def start_job(username: str, password: str, email: str = "",
+              app_password: str = "") -> str:
     _purge()
     job = LoginJob(id=uuid.uuid4().hex)
     with _lock:
         _jobs[job.id] = job
-    thread = threading.Thread(target=_run, args=(job, username, password),
+    thread = threading.Thread(target=_run, args=(job, username, password,
+                                                 email, app_password),
                               daemon=True, name=f"login-{job.id[:8]}")
     thread.start()
     return job.id
@@ -90,18 +92,24 @@ def submit_code(job_id: str, code: str) -> bool:
 
 
 def _perform_login(job: LoginJob, username: str, password: str,
-                   code_callback: Callable[[str, str], str]):
-    """Library interaction, isolated for testability. Returns (ig, session_path)."""
+                   code_callback: Callable[[str, str], str],
+                   email_creds: tuple[str, str] | None = None):
+    """Library interaction, isolated for testability. Returns ig client."""
     from instaharvest_v2 import Instagram
 
     _push(job, "creating Instagram client ...")
     ig = Instagram(challenge_callback=code_callback)
     _push(job, f"logging in as @{username} ...")
-    ig.login(username, password)
+    if email_creds:
+        _push(job, "email auto-verify enabled (code will be read from Gmail) ...")
+        ig.login(username, password, email_credentials=email_creds)
+    else:
+        ig.login(username, password)
     return ig
 
 
-def _run(job: LoginJob, username: str, password: str) -> None:
+def _run(job: LoginJob, username: str, password: str,
+         email: str = "", app_password: str = "") -> None:
     def code_callback(challenge_type: str = "", contact_point: str = "") -> str:
         job.challenge_type = str(challenge_type or "")
         job.contact_point = str(contact_point or "")
@@ -117,7 +125,8 @@ def _run(job: LoginJob, username: str, password: str) -> None:
 
     try:
         _push(job, "job started.")
-        ig = _perform_login(job, username, password, code_callback)
+        creds = (email, app_password) if email and app_password else None
+        ig = _perform_login(job, username, password, code_callback, creds)
     except Exception as exc:
         from app.instagram.adapter import InstagramAdapter
         kind = InstagramAdapter.classify_error(exc)
@@ -128,8 +137,9 @@ def _run(job: LoginJob, username: str, password: str) -> None:
                    "in-app approval (open the Instagram app and try again).")
         return
     finally:
-        password = ""  # noqa: F841 - drop credential reference ASAP
-        del password
+        password = ""  # noqa: F841 - drop credential references ASAP
+        app_password = ""  # noqa: F841
+        del password, app_password
 
     try:
         _push(job, "login accepted, validating session ...")
