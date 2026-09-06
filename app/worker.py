@@ -3,6 +3,10 @@
 Crash-safety order: claim (PROCESSING) -> download -> upload -> obtain
 destination pk -> mark COMPLETED. Never COMPLETED before Instagram confirms.
 Uncertain upload outcomes are NOT blindly retried.
+
+Resilience: walks ALL eligible candidates in feed order. A pick that proves
+undownloadable is marked FAILED (retryable later) and the next candidate is
+tried, instead of failing the whole run on the first pick.
 """
 
 from __future__ import annotations
@@ -10,13 +14,16 @@ from __future__ import annotations
 import logging
 import time
 
-from app.database import repository as repo
 from app import activity
+from app.database import repository as repo
 from app.instagram import covers as cover_mod
 from app.instagram import downloader, uploader
 from app.instagram.discovery import filter_candidates
 
 log = logging.getLogger(__name__)
+
+# Max per-run video-URL resolutions (each costs Instagram API calls).
+MAX_RESOLVE_ATTEMPTS = 5
 
 
 def run_once(*, settings, db, adapter) -> dict:
@@ -33,83 +40,52 @@ def run_once(*, settings, db, adapter) -> dict:
         counters["reels_found"] = len(candidates)
         activity.emit(f"DISCOVERY found={len(candidates)}")
 
-        pick, stats = filter_candidates(
+        eligible, stats = filter_candidates(
             candidates,
             already_done=lambda mid: repo.is_completed(db, mid, dest),
         )
         counters["reels_skipped"] = stats["skipped"]
-        if pick is None:
+        if not eligible:
             activity.emit(f"NO_NEW_REEL skipped={stats['skipped']}")
             repo.finish_run(db, run_id, "no_new_reel", "", **counters)
             return {"status": "no_new_reel", **counters}
 
-        claimed, reason = repo.try_claim_reel(
-            db, source_media_id=pick.source_media_id, shortcode=pick.shortcode,
-            username=pick.username, destination_account=dest,
-            stale_sec=settings.STALE_CLAIM_TIMEOUT_SEC,
-        )
-        log.info("CLAIM media_id=%s result=%s", pick.source_media_id, reason)
-        activity.emit(f"CLAIM media_id={pick.source_media_id} result={reason}")
-        if not claimed:
-            repo.finish_run(db, run_id, "no_new_reel",
-                            f"claim refused: {reason}", **counters)
-            return {"status": "no_new_reel", "reason": reason, **counters}
+        resolved_tried = 0
+        last_error = ""
+        for pick in eligible:
+            claimed, reason = repo.try_claim_reel(
+                db, source_media_id=pick.source_media_id, shortcode=pick.shortcode,
+                username=pick.username, destination_account=dest,
+                stale_sec=settings.STALE_CLAIM_TIMEOUT_SEC,
+            )
+            log.info("CLAIM media_id=%s result=%s", pick.source_media_id, reason)
+            activity.emit(f"CLAIM media_id={pick.source_media_id} result={reason}")
+            if not claimed:
+                continue
 
-        counters["reels_attempted"] = 1
-        video_path = cover_path = None
-        cover_label = ""
-        try:
+            counters["reels_attempted"] += 1
+            resolved_tried += 1
             pick = adapter.ensure_video_url(pick)
             if not pick.video_url:
-                raise RuntimeError("source reel is not downloadable (no video_url)")
-            repo.mark_status(db, pick.source_media_id, dest, "DOWNLOADED")
-            video_path = downloader.download_to_tmp(
-                pick.video_url, timeout=settings.HTTP_TIMEOUT_SEC,
-                max_bytes=settings.MAX_VIDEO_BYTES)
-            activity.emit(f"DOWNLOADED media_id={pick.source_media_id}")
+                last_error = "source reel is not downloadable (no video_url)"
+                log.warning("RESOLVE failed media_id=%s", pick.source_media_id)
+                activity.emit(f"RESOLVE failed media_id={pick.source_media_id}")
+                repo.mark_status(db, pick.source_media_id, dest, "FAILED",
+                                 error=last_error)
+                counters["reels_failed"] += 1
+                if resolved_tried >= MAX_RESOLVE_ATTEMPTS:
+                    break
+                continue  # try next eligible candidate
+            result = _upload_picked(db=db, adapter=adapter, settings=settings,
+                                    dest=dest, pick=pick, counters=counters,
+                                    run_id=run_id, t0=t0)
+            return result
 
-            cover = cover_mod.select_cover(
-                mode=settings.COVER_MODE, cover_dir=settings.COVER_DIR,
-                fixed_file=settings.COVER_FILE, db=db)
-            cover_mod.validate_cover(cover)
-            cover_path, cover_label = str(cover), str(cover)
-            log.info("COVER selected=%s", cover_label)
-            activity.emit(f"COVER selected={cover_label}")
-
-            caption = (settings.REEL_CAPTION or "").replace(
-                "{username}", pick.username or "instagram").replace(
-                "{shortcode}", pick.shortcode or "")
-            dest_pk = uploader.upload_reel(
-                adapter, video_path=video_path, cover_path=cover_path,
-                caption=caption, duration=pick.duration,
-                hide_counts=settings.HIDE_LIKE_VIEW_COUNTS)
-            repo.mark_status(db, pick.source_media_id, dest, "COMPLETED",
-                             destination_media_id=dest_pk)
-            counters["reels_uploaded"] = 1
-            log.info("DATABASE completed media_id=%s dest=%s", pick.source_media_id, dest_pk)
-            activity.emit(f"UPLOAD success destination_media_id={dest_pk}")
-            activity.emit(f"DATABASE completed media_id={pick.source_media_id}")
-            repo.finish_run(db, run_id, "success", "", **counters)
-            return {
-                "status": "success",
-                "source_media_id": pick.source_media_id,
-                "source_shortcode": pick.shortcode,
-                "destination_media_id": dest_pk,
-                "cover": cover_label,
-                "elapsed_sec": round(time.time() - t0, 1),
-            }
-        except Exception as exc:  # noqa: BLE001 - must record + cleanup
-            kind = adapter.classify_error(exc) if hasattr(adapter, "classify_error") else "unknown"
-            log.error("PIPELINE failed media_id=%s kind=%s err=%r",
-                      pick.source_media_id, kind, exc)
-            activity.emit(f"FAILED media_id={pick.source_media_id} kind={kind}")
-            repo.mark_status(db, pick.source_media_id, dest, "FAILED", error=f"{kind}: {exc}")
-            counters["reels_failed"] = 1
-            repo.finish_run(db, run_id, "failed", f"{kind}: {exc}", **counters)
-            return {"status": "failed", "error": f"{kind}: {exc}",
-                    "source_media_id": pick.source_media_id}
-        finally:
-            downloader.cleanup(video_path)
+        repo.finish_run(db, run_id, "no_new_reel" if not last_error else "failed",
+                        last_error, **counters)
+        if last_error:
+            return {"status": "failed", "error": last_error}
+        return {"status": "no_new_reel", **counters}
     except Exception as exc:  # noqa: BLE001 - feed/auth-level failure
         log.error("PIPELINE run failed: %r", exc)
         try:
@@ -117,3 +93,59 @@ def run_once(*, settings, db, adapter) -> dict:
         except Exception:
             pass
         return {"status": "failed", "error": str(exc)[:500]}
+
+
+def _upload_picked(*, db, adapter, settings, dest, pick, counters,
+                   run_id: int, t0: float) -> dict:
+    """Download -> cover -> upload -> COMPLETED for a resolved candidate."""
+    video_path = None
+    cover_label = ""
+    try:
+        repo.mark_status(db, pick.source_media_id, dest, "DOWNLOADED")
+        video_path = downloader.download_to_tmp(
+            pick.video_url, timeout=settings.HTTP_TIMEOUT_SEC,
+            max_bytes=settings.MAX_VIDEO_BYTES)
+        activity.emit(f"DOWNLOADED media_id={pick.source_media_id}")
+
+        cover = cover_mod.select_cover(
+            mode=settings.COVER_MODE, cover_dir=settings.COVER_DIR,
+            fixed_file=settings.COVER_FILE, db=db)
+        cover_mod.validate_cover(cover)
+        cover_label = str(cover)
+        log.info("COVER selected=%s", cover_label)
+        activity.emit(f"COVER selected={cover_label}")
+
+        caption = (settings.REEL_CAPTION or "").replace(
+            "{username}", pick.username or "instagram").replace(
+            "{shortcode}", pick.shortcode or "")
+        dest_pk = uploader.upload_reel(
+            adapter, video_path=video_path, cover_path=cover_label,
+            caption=caption, duration=pick.duration,
+            hide_counts=settings.HIDE_LIKE_VIEW_COUNTS)
+        repo.mark_status(db, pick.source_media_id, dest, "COMPLETED",
+                         destination_media_id=dest_pk)
+        counters["reels_uploaded"] = 1
+        log.info("DATABASE completed media_id=%s dest=%s", pick.source_media_id, dest_pk)
+        activity.emit(f"UPLOAD success destination_media_id={dest_pk}")
+        activity.emit(f"DATABASE completed media_id={pick.source_media_id}")
+        repo.finish_run(db, run_id, "success", "", **counters)
+        return {
+            "status": "success",
+            "source_media_id": pick.source_media_id,
+            "source_shortcode": pick.shortcode,
+            "destination_media_id": dest_pk,
+            "cover": cover_label,
+            "elapsed_sec": round(time.time() - t0, 1),
+        }
+    except Exception as exc:  # noqa: BLE001 - must record + cleanup
+        kind = adapter.classify_error(exc) if hasattr(adapter, "classify_error") else "unknown"
+        log.error("PIPELINE failed media_id=%s kind=%s err=%r",
+                  pick.source_media_id, kind, exc)
+        activity.emit(f"FAILED media_id={pick.source_media_id} kind={kind}")
+        repo.mark_status(db, pick.source_media_id, dest, "FAILED", error=f"{kind}: {exc}")
+        counters["reels_failed"] = 1
+        repo.finish_run(db, run_id, "failed", f"{kind}: {exc}", **counters)
+        return {"status": "failed", "error": f"{kind}: {exc}",
+                "source_media_id": pick.source_media_id}
+    finally:
+        downloader.cleanup(video_path)

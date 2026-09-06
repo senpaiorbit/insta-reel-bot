@@ -13,9 +13,14 @@ def filter_candidates(candidates: list[ReelCandidate], *,
                       already_done,
                       max_duration_sec: float = 0,
                       min_duration_sec: float = 0,
-                      blacklist: set[str] | None = None) -> tuple[ReelCandidate | None, dict]:
-    """Walk the whole batch (never stop after N skips). Returns (pick, stats)."""
+                      blacklist: set[str] | None = None) -> tuple[list[ReelCandidate], dict]:
+    """Walk the whole batch (never stop after N skips).
+
+    Returns (eligible, stats): EVERY eligible candidate in feed order, so the
+    worker can try the next one when a pick proves undownloadable.
+    """
     stats = {"total": len(candidates), "skipped": 0, "reasons": {}}
+    eligible: list[ReelCandidate] = []
 
     def skip(cand_id: str, reason: str):
         stats["skipped"] += 1
@@ -45,5 +50,5 @@ def filter_candidates(candidates: list[ReelCandidate], *,
         if not cand.video_url and not cand.shortcode:
             skip(cid, "not_downloadable")
             continue
-        return cand, stats
-    return None, stats
+        eligible.append(cand)
+    return eligible, stats
