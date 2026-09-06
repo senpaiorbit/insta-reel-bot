@@ -40,23 +40,31 @@ def init_schema(db) -> None:
 
 
 def archive_candidates(db, *, destination_account: str = "",
-                       older_than_iso: str) -> list[dict]:
-    """COMPLETED uploads older than cutoff that were never archived.
+                       older_than_iso: str, only_pk: str = "") -> list[dict]:
+    """COMPLETED uploads eligible for archiving that were never archived.
 
     Rows without a destination_media_id or completed_at are skipped —
     archiving needs the live pk, and age is measured from completed_at.
+    only_pk restricts to one destination pk (explicit owner targeting,
+    bypasses the age cutoff but keeps every other gate).
     """
-    rows = db.query_dicts(
-        "SELECT source_media_id, source_shortcode, destination_account,"
-        " destination_media_id, completed_at FROM processed_reels"
-        " WHERE status='COMPLETED' AND COALESCE(archived, 0)=0"
-        " AND destination_media_id IS NOT NULL AND destination_media_id != ''"
-        " AND completed_at IS NOT NULL AND completed_at != ''"
-        " AND completed_at < ?"
-        + (" AND destination_account=?" if destination_account else "")
-        + " ORDER BY completed_at ASC",
-        (older_than_iso,) + ((destination_account,) if destination_account else ()),
-    )
+    q = ("SELECT source_media_id, source_shortcode, destination_account,"
+         " destination_media_id, completed_at FROM processed_reels"
+         " WHERE status='COMPLETED' AND COALESCE(archived, 0)=0"
+         " AND destination_media_id IS NOT NULL AND destination_media_id != ''"
+         " AND completed_at IS NOT NULL AND completed_at != ''")
+    args: list = []
+    if only_pk:
+        q += " AND destination_media_id=?"
+        args.append(only_pk)
+    else:
+        q += " AND completed_at < ?"
+        args.append(older_than_iso)
+    if destination_account:
+        q += " AND destination_account=?"
+        args.append(destination_account)
+    q += " ORDER BY completed_at ASC"
+    rows = db.query_dicts(q, tuple(args))
     return [dict(r) for r in rows]
 
 
