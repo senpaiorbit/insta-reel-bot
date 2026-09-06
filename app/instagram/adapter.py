@@ -1,12 +1,16 @@
 """InstagramAdapter — the ONLY module that talks to instaharvest_v2.
 
-Verified against instaharvest-v2 1.1.x docs (mpython77/instaharvest_v2):
+Verified against instaharvest-v2 1.1.x (mpython77/instaharvest_v2):
   package/class : ``pip install instaharvest-v2`` / ``from instaharvest_v2 import Instagram``
   auth          : ``Instagram.from_env()``, ``ig.login(u, p)``,
                   ``ig.save_session(path)`` / ``ig.auth.save_session/load_session``,
                   ``ig.auth.validate_session()``, ``Instagram.from_session_file(path)``
-  reels feed    : ``ig.feed.get_reels_feed(max_id=None)`` -> dict  (NO count kwarg;
-                  paginate with max_id). ``get_timeline`` is home feed — NOT used.
+  reels feed    : ``ig.feed.get_reels_feed(count=20, cursor=None)`` -> dict
+                  {posts, has_next, end_cursor, count} (GraphQL v2, REST
+                  fallback may use {items, more_available, next_max_id}).
+                  Verified against installed source api/feed.py — the docs'
+                  ``max_id`` kwarg does NOT exist. ``get_timeline`` is home
+                  feed — NOT used.
   media model   : Media.{pk, shortcode, media_type(1/2/8), video_url, video_duration, ...}
                   raw feed dicts use ``pk``/``id``, ``code``/``shortcode``.
   upload        : ``ig.upload.post_reel(video_path|video_data, thumbnail_path|
@@ -37,7 +41,7 @@ log = logging.getLogger(__name__)
 # Feature-detection results (honest reporting, never faked).
 SUPPORTS_HIDDEN_COUNTS = False  # verified: post_reel() has no such parameter
 SUPPORTS_REEL_COVER = True  # via thumbnail_path / thumbnail_data on post_reel()
-REELS_FEED_SIGNATURE = "get_reels_feed(max_id=None) -> dict (paginate manually)"
+REELS_FEED_SIGNATURE = "get_reels_feed(count=20, cursor=None) -> {posts, has_next, end_cursor, count}"
 
 
 @dataclass
@@ -213,21 +217,30 @@ class InstagramAdapter:
             raise RuntimeError("Instagram client not loaded; call load_session() first")
         log.info("DISCOVERY started target=%d", count)
         items: list = []
-        max_id = None
+        cursor = None
         seen_pages = 0
+        # Real signature (installed source): get_reels_feed(count, cursor)
+        # -> {posts, has_next, end_cursor, count}. REST fallback may use
+        # {items, more_available, next_max_id} — accept both.
         while len(items) < count and seen_pages < 10:
-            page = self._ig.feed.get_reels_feed(max_id=max_id)
-            batch = page.get("items", page.get("posts", [])) if isinstance(page, dict) else []
+            page = self._ig.feed.get_reels_feed(count=min(count, 20), cursor=cursor)
+            if isinstance(page, dict):
+                batch = page.get("posts", page.get("items", []))
+            else:
+                batch = []
             if not batch and hasattr(page, "items") and not isinstance(page, dict):
                 items_attr = page.items  # type: ignore[union-attr]
                 batch = items_attr if isinstance(items_attr, list) else []
             if not batch:
                 break
             items.extend(batch)
-            max_id = page.get("next_max_id", page.get("end_cursor")) if isinstance(page, dict) else None
-            more = page.get("more_available", page.get("has_next")) if isinstance(page, dict) else False
+            if isinstance(page, dict):
+                more = page.get("has_next", page.get("more_available", False))
+                cursor = page.get("end_cursor", page.get("next_max_id"))
+            else:
+                more, cursor = False, None
             seen_pages += 1
-            if not more or not max_id:
+            if not more or not cursor:
                 break
         out = []
         for entry in items[:count]:
