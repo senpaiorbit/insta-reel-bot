@@ -213,6 +213,84 @@ def test_login_code_flow_with_stub(monkeypatch):
     assert job.session_json == '{"ok": true}'
 
 
+def test_manual_checkpoint_flow_with_stub(monkeypatch):
+    """CheckpointRequired (no callback) -> manual ChallengeHandler path."""
+    import sys
+    import types
+
+    import app.login_flow as lf
+
+    class FakeCheckpoint(Exception):
+        def __init__(self):
+            super().__init__("Email verification needed.")
+            self.challenge_url = "/challenge/123/abc/"
+
+    class FakeCtx:
+        challenge_type = "email"
+        contact_point = "t***@x.com"
+
+    class FakeResult:
+        success = True
+        message = "ok"
+
+    class FakeHandler:
+        def __init__(self, code_callback=None, preferred_method=None):
+            self.cb = code_callback
+
+        def resolve(self, session=None, challenge_url="", csrf_token="", user_agent=""):
+            assert challenge_url == "/challenge/123/abc/"
+            assert session is not None
+            assert self.cb is not None
+            assert self.cb(FakeCtx()) == "654321"
+            return FakeResult()
+
+    mod = types.ModuleType("instaharvest_v2.challenge")
+    setattr(mod, "ChallengeHandler", FakeHandler)
+    monkeypatch.setitem(sys.modules, "instaharvest_v2.challenge", mod)
+
+    class FakeAuth:
+        def save_session(self, path):
+            with open(path, "w") as fh:
+                fh.write('{"manual": true}')
+
+    class FakeIG:
+        auth = FakeAuth()
+        account = None
+
+        def get(self, *a, **k):
+            raise AssertionError("must not be called")
+
+        def post(self, *a, **k):
+            raise AssertionError("must not be called")
+
+    def fake_perform(job, username, password, cb, email_creds=None):
+        job._ig = FakeIG()
+        raise FakeCheckpoint()
+
+    monkeypatch.setattr(lf, "_perform_login", fake_perform)
+    jid = lf.start_job("u", "p")
+    import time
+    for _ in range(100):
+        job = lf.get_job(jid)
+        assert job is not None
+        if job.status == "awaiting_code":
+            break
+        time.sleep(0.05)
+    waiting = lf.get_job(jid)
+    assert waiting is not None and waiting.status == "awaiting_code"
+    assert lf.submit_code(jid, "654321")
+    for _ in range(100):
+        job = lf.get_job(jid)
+        assert job is not None
+        if job.status == "done":
+            break
+        time.sleep(0.05)
+    job = lf.get_job(jid)
+    assert job is not None
+    assert job.status == "done"
+    assert job.session_json == '{"manual": true}'
+
+
 def test_login_routes_reject_anonymous():
     from fastapi.testclient import TestClient
 
