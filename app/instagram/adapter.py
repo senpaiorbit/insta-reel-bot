@@ -1,33 +1,15 @@
 """InstagramAdapter — the ONLY module that talks to instaharvest_v2.
 
-Verified against instaharvest-v2 1.1.x (mpython77/instaharvest_v2):
-  package/class : ``pip install instaharvest-v2`` / ``from instaharvest_v2 import Instagram``
-  auth          : ``Instagram.from_env()``, ``ig.login(u, p)``,
-                  ``ig.save_session(path)`` / ``ig.auth.save_session/load_session``,
-                  ``ig.auth.validate_session()``, ``Instagram.from_session_file(path)``
-  reels feed    : ``ig.feed.get_reels_feed(count=20, cursor=None)`` -> dict
-                  {posts, has_next, end_cursor, count} (GraphQL v2, REST
-                  fallback may use {items, more_available, next_max_id}).
-                  Verified against installed source api/feed.py — the docs'
-                  ``max_id`` kwarg does NOT exist. ``get_timeline`` is home
-                  feed — NOT used.
-  media model   : Media.{pk, shortcode, media_type(1/2/8), video_url, video_duration, ...}
-                  raw feed dicts use ``pk``/``id``, ``code``/``shortcode``.
-                  Trending items carry NO video URL — resolve per shortcode via
-                  media.get_by_shortcode / public.get_post_by_shortcode / get_info.
-  upload        : ``ig.upload.post_reel(video_path|video_data, thumbnail_path|
-                  thumbnail_data, caption, duration, width, height)`` -> dict with
-                  media pk. NO hide-like-counts parameter exists.
-  download      : ``ig.download.download_media(media_pk)``; public fallback
-                  ``ig.public.get_post_by_shortcode(code)`` -> video_url.
-  exceptions    : ``instaharvest_v2.exceptions``: InstagramError, LoginRequired,
-                  ChallengeRequired, CheckpointRequired, ConsentRequired,
-                  RateLimitError, NotFoundError/MediaNotFound, NetworkError, ProxyError.
-  upstream bug  : installed GraphQL/users/client internals call bare
-                  ``build_request_headers()`` without importing it (defined in
-                  ``instaharvest_v2.http_utils``). Patched at runtime for every
-                  loaded instaharvest_v2 module, see
-                  ``patch_missing_library_imports()``.
+Verified against installed instaharvest-v2 source (not just docs):
+  reels feed : ``ig.feed.get_reels_feed(count=20, cursor=None)``
+               -> {posts, has_next, end_cursor, count}.
+  media model: ``Media`` has NO ``video_url`` field — video lives in
+               ``video_versions`` / ``best_video_url``. See _best_video_url().
+  upload     : ``ig.upload.post_reel(video_path, thumbnail_path, caption,
+               duration, width, height)`` -> dict with media pk.
+  upstream bug: installed GraphQL/users/client internals call bare
+               ``build_request_headers()`` — patched at runtime, see
+               ``patch_missing_library_imports()``.
 
 Everything else in the app uses the ReelCandidate dataclass below, never the
 library's internals — so the client can be swapped later.
@@ -49,10 +31,8 @@ log = logging.getLogger(__name__)
 # ``build_request_headers(...)`` without importing it — the real function
 # lives in ``instaharvest_v2.http_utils``. Symptom: NameError on GraphQL /
 # users / client calls, which feed methods swallow into empty results.
-# Tracebacks implicated transport.py, users.py and client.py internals, and
-# the layout differs from GitHub main, so instead of guessing filenames we
-# pre-import every plausible submodule and inject the genuine function into
-# ALL loaded instaharvest_v2 modules that lack it (harmless where unused).
+# We pre-import every plausible submodule and inject the genuine function
+# into ALL loaded instaharvest_v2 modules that lack it (harmless unused).
 _PATCH_CANDIDATES = (
     "instaharvest_v2.api.graphql",
     "instaharvest_v2.api.users",
@@ -142,6 +122,30 @@ def _get(obj: Any, *names: str, default: Any = "") -> Any:
     return default
 
 
+def _best_video_url(obj: Any) -> str:
+    """Extract the best video URL from Media models, parsed dicts, or versions.
+
+    The Media model has NO ``video_url`` field — video lives in
+    ``video_versions`` (or the ``best_video_url`` computed property).
+    """
+    for name in ("video_url", "video_download_url", "best_video_url"):
+        direct = _get(obj, name, default="")
+        if direct:
+            return str(direct)
+    versions = _get(obj, "video_versions", default=[]) or []
+    best, best_w = "", -1
+    if isinstance(versions, list):
+        for ver in versions:
+            url = _get(ver, "url", default="")
+            try:
+                width = int(_get(ver, "width", default=0) or 0)
+            except (TypeError, ValueError):
+                width = 0
+            if url and width >= best_w:
+                best, best_w = str(url), width
+    return best
+
+
 def normalize_reel(item: Any) -> ReelCandidate | None:
     """Normalize one feed entry. Returns None when identity is missing."""
     media_id = str(_get(item, "pk", "id", "media_id", default="") or "")
@@ -158,11 +162,7 @@ def normalize_reel(item: Any) -> ReelCandidate | None:
         duration = float(_get(item, "video_duration", "duration", default=0.0) or 0.0)
     except (TypeError, ValueError):
         duration = 0.0
-    video_url = str(_get(item, "video_url", "video_download_url", default="") or "")
-    if not video_url:  # nested video_versions fallback (raw REST payloads)
-        versions = _get(item, "video_versions", default=[]) or []
-        if isinstance(versions, list) and versions:
-            video_url = str(_get(versions[0], "url", default="") or "")
+    video_url = _best_video_url(item)
     cap = _get(item, "caption", default="")
     caption_text = cap.get("text", "") if isinstance(cap, dict) else str(cap or "")
     raw = item if isinstance(item, dict) else getattr(item, "to_dict", lambda: {})()
@@ -266,10 +266,6 @@ class InstagramAdapter:
             try:
                 ok = validator()
                 if ok is False:
-                    # Some sessions validate False on one endpoint (new IP,
-                    # pending checkpoint) yet still work for feed/upload.
-                    # Proceed — the feed call is the real test and its
-                    # LoginRequired error is classified + reported cleanly.
                     log.warning("AUTH validate_session returned False; proceeding "
                                 "anyway, feed will confirm")
             except RuntimeError:
@@ -331,11 +327,11 @@ class InstagramAdapter:
         if not cand.shortcode:
             _act.emit("RESOLVE abort: no shortcode")
             return cand
-        # 1) authenticated media lookup (Media model carries video_url)
+        # 1) authenticated media lookup (Media model carries video_versions)
         _act.emit("RESOLVE trying media.get_by_shortcode ...")
         try:
             media = self._ig.media.get_by_shortcode(cand.shortcode)
-            url = _get(media, "video_url", default="")
+            url = _best_video_url(media)
             _act.emit(f"RESOLVE media.get_by_shortcode done has_url={bool(url)}")
             if url:
                 cand.video_url = str(url)
@@ -348,7 +344,7 @@ class InstagramAdapter:
         _act.emit("RESOLVE trying public.get_post_by_shortcode ...")
         try:
             post = self._ig.public.get_post_by_shortcode(cand.shortcode)
-            url = _get(post, "video_url", default="")
+            url = _best_video_url(post)
             _act.emit(f"RESOLVE public lookup done has_url={bool(url)}")
             if url:
                 cand.video_url = str(url)
@@ -363,7 +359,7 @@ class InstagramAdapter:
             getter = getattr(getattr(self._ig, "media", None), "get_info", None)
             if callable(getter) and cand.source_media_id:
                 media = getter(cand.source_media_id)
-                url = _get(media, "video_url", default="")
+                url = _best_video_url(media)
                 _act.emit(f"RESOLVE get_info done has_url={bool(url)}")
                 if url:
                     cand.video_url = str(url)
@@ -415,15 +411,11 @@ class InstagramAdapter:
             "RateLimitError": "instagram_rate_limited",
             "NetworkError": "network",
             "ProxyError": "proxy",
-        }
-        # NotFoundError/MediaNotFound/UserNotFound/PrivateAccountError handled below
-        extra = {
             "NotFoundError": "instagram_not_found",
             "MediaNotFound": "instagram_not_found",
             "UserNotFound": "instagram_not_found",
             "PrivateAccountError": "instagram_private",
         }
-        mapping.update(extra)
         return mapping.get(name, "unknown")
 
 
