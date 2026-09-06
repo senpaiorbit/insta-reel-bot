@@ -137,6 +137,31 @@ def api_debug(token: str | None = None,
                     out[name] = {"type": type(raw).__name__}
             except Exception as exc:
                 out[name] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        # Direct (unmasked) probes: feed methods swallow errors into empties.
+        gql = getattr(adapter._ig, "graphql", None)
+        if gql is None:
+            out["graphql_layer"] = "missing"
+        else:
+            try:
+                raw = gql.get_reels_trending_v2(count=12)
+                posts = raw.get("posts", []) if isinstance(raw, dict) else []
+                out["graphql_reels"] = {"posts": len(posts)}
+            except Exception as exc:
+                out["graphql_reels"] = {
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        who = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME or ""
+        if who:
+            try:
+                user = adapter._ig.users.get_by_username(who)
+                out["self_profile"] = {
+                    "username": getattr(user, "username", None),
+                    "followers": getattr(user, "followers", None),
+                }
+            except Exception as exc:
+                out["self_profile"] = {
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        else:
+            out["self_profile"] = {"skipped": "no username configured"}
     except Exception as exc:
         out["auth"] = f"failed: {type(exc).__name__}: {str(exc)[:300]}"
     return out
