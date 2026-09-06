@@ -1,18 +1,18 @@
-"""FastAPI service: /health, /status, POST /upload (UptimeRobot)."""
+"""FastAPI service: /health, /status, POST /upload (UptimeRobot), /live activity."""
 
 from __future__ import annotations
 
 import logging
 import secrets
 import threading
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
 
-from app import login_flow
-from app import login_page
+from app import activity
+from app import live_page
 from app.config import get_settings
 from app.database import repository as repo
 from app.database.db import TursoClient
@@ -55,11 +55,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Instagram Reel Bot", lifespan=lifespan)
 
 
-def _authorized(authorization: str | None) -> bool:
-    if not authorization or not authorization.startswith("Bearer "):
-        return False
-    token = authorization[len("Bearer "):].strip()
-    return bool(token) and secrets.compare_digest(token, settings.UPLOAD_SECRET)
+def _authorized(authorization: str | None = None, token: str | None = None) -> bool:
+    """Bearer header OR ?token= query param (simple UptimeRobot/browser use)."""
+    if authorization and authorization.startswith("Bearer "):
+        cand = authorization[len("Bearer "):].strip()
+        if cand and secrets.compare_digest(cand, settings.UPLOAD_SECRET):
+            return True
+    if token and secrets.compare_digest(token, settings.UPLOAD_SECRET):
+        return True
+    return False
 
 
 @app.get("/")
@@ -77,16 +81,42 @@ def status():
     return {"status": "ok", **info}
 
 
+@app.get("/live")
+def live():
+    """Live activity page. Open as /live?token=YOUR_SECRET and watch runs."""
+    return HTMLResponse(live_page.LIVE_HTML,
+                        headers={"Cache-Control": "no-store, max-age=0"})
+
+
+@app.get("/api/activity")
+def api_activity(token: str | None = None,
+                 authorization: str | None = Header(default=None)):
+    if not _authorized(authorization, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        info = repo.counts(get_db())
+    except Exception as exc:
+        return {"events": activity.recent(), "last_run": None,
+                "db_error": str(exc)[:200],
+                "service_time": time.strftime("%H:%M:%S")}
+    return {"events": activity.recent(), "last_run": info.get("last_run"),
+            "processed_completed": info.get("processed_completed"),
+            "service_time": time.strftime("%H:%M:%S")}
+
+
 @app.post("/upload")
-def upload(authorization: str | None = Header(default=None)):
-    if not _authorized(authorization):
+def upload(token: str | None = None,
+           authorization: str | None = Header(default=None)):
+    if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
     if _thread_lock.locked():
+        activity.emit("BUSY — overlapping /upload call rejected")
         return JSONResponse({"status": "busy"}, status_code=429)
     db = get_db()
     # Database-level distributed lock (mandatory for multi-instance).
     try:
         if not repo.acquire_lock(db, ttl_sec=settings.UPLOAD_LOCK_TIMEOUT_SEC):
+            activity.emit("BUSY — distributed lock held, rejecting")
             return JSONResponse({"status": "busy"}, status_code=429)
     except Exception as exc:
         log.error("LOCK acquire failed: %r", exc)
@@ -99,6 +129,7 @@ def upload(authorization: str | None = Header(default=None)):
             pass
         return JSONResponse({"status": "busy"}, status_code=429)
     try:
+        activity.emit("UPLOAD request accepted — starting pipeline")
         from app.instagram.client import create_client
         from app.worker import run_once
         adapter = create_client(settings)
@@ -111,73 +142,3 @@ def upload(authorization: str | None = Header(default=None)):
             repo.release_lock(db)
         except Exception:
             pass
-
-
-# ---------------- interactive login helper ----------------
-
-class LoginStart(BaseModel):
-    username: str
-    password: str
-    email: str = ""  # Gmail for auto-verifying email checkpoints
-    app_password: str = ""  # Gmail app password (Google Account -> 2FA -> app passwords)
-
-
-class LoginCode(BaseModel):
-    job_id: str
-    code: str
-
-
-@app.get("/login")
-def login_ui():
-    """Terminal-style page: enter IG credentials, watch log, get session JSON."""
-    return HTMLResponse(login_page.LOGIN_HTML,
-                        headers={"Cache-Control": "no-store, max-age=0"})
-
-
-@app.post("/login/start")
-def login_start(body: LoginStart, authorization: str | None = Header(default=None)):
-    if not _authorized(authorization):
-        raise HTTPException(status_code=401, detail="unauthorized")
-    if not body.username or not body.password:
-        raise HTTPException(status_code=400, detail="username and password required")
-    job_id = login_flow.start_job(body.username.strip(), body.password,
-                                    body.email.strip(), body.app_password)
-    return {"job_id": job_id}
-
-
-@app.get("/login/status/{job_id}")
-def login_status(job_id: str, authorization: str | None = Header(default=None)):
-    if not _authorized(authorization):
-        raise HTTPException(status_code=401, detail="unauthorized")
-    job = login_flow.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="unknown or expired job")
-    return {
-        "status": job.status,
-        "logs": job.logs,
-        "challenge": {"type": job.challenge_type, "contact": job.contact_point}
-        if job.status == "awaiting_code" else None,
-        "error": job.error,
-        "account_username": job.account_username,
-    }
-
-
-@app.post("/login/code")
-def login_code(body: LoginCode, authorization: str | None = Header(default=None)):
-    if not _authorized(authorization):
-        raise HTTPException(status_code=401, detail="unauthorized")
-    if not login_flow.submit_code(body.job_id, body.code):
-        raise HTTPException(status_code=404, detail="unknown job or no code requested")
-    return {"ok": True}
-
-
-@app.get("/login/session/{job_id}")
-def login_session(job_id: str, authorization: str | None = Header(default=None)):
-    if not _authorized(authorization):
-        raise HTTPException(status_code=401, detail="unauthorized")
-    job = login_flow.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="unknown or expired job")
-    if job.status != "done" or not job.session_json:
-        raise HTTPException(status_code=409, detail=f"session not ready (status={job.status})")
-    return {"session": job.session_json, "account_username": job.account_username}

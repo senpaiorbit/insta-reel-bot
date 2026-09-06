@@ -11,6 +11,7 @@ import logging
 import time
 
 from app.database import repository as repo
+from app import activity
 from app.instagram import covers as cover_mod
 from app.instagram import downloader, uploader
 from app.instagram.discovery import filter_candidates
@@ -30,6 +31,7 @@ def run_once(*, settings, db, adapter) -> dict:
 
         candidates = adapter.get_reels(count=settings.REEL_FETCH_COUNT)
         counters["reels_found"] = len(candidates)
+        activity.emit(f"DISCOVERY found={len(candidates)}")
 
         pick, stats = filter_candidates(
             candidates,
@@ -37,6 +39,7 @@ def run_once(*, settings, db, adapter) -> dict:
         )
         counters["reels_skipped"] = stats["skipped"]
         if pick is None:
+            activity.emit(f"NO_NEW_REEL skipped={stats['skipped']}")
             repo.finish_run(db, run_id, "no_new_reel", "", **counters)
             return {"status": "no_new_reel", **counters}
 
@@ -46,6 +49,7 @@ def run_once(*, settings, db, adapter) -> dict:
             stale_sec=settings.STALE_CLAIM_TIMEOUT_SEC,
         )
         log.info("CLAIM media_id=%s result=%s", pick.source_media_id, reason)
+        activity.emit(f"CLAIM media_id={pick.source_media_id} result={reason}")
         if not claimed:
             repo.finish_run(db, run_id, "no_new_reel",
                             f"claim refused: {reason}", **counters)
@@ -62,6 +66,7 @@ def run_once(*, settings, db, adapter) -> dict:
             video_path = downloader.download_to_tmp(
                 pick.video_url, timeout=settings.HTTP_TIMEOUT_SEC,
                 max_bytes=settings.MAX_VIDEO_BYTES)
+            activity.emit(f"DOWNLOADED media_id={pick.source_media_id}")
 
             cover = cover_mod.select_cover(
                 mode=settings.COVER_MODE, cover_dir=settings.COVER_DIR,
@@ -69,6 +74,7 @@ def run_once(*, settings, db, adapter) -> dict:
             cover_mod.validate_cover(cover)
             cover_path, cover_label = str(cover), str(cover)
             log.info("COVER selected=%s", cover_label)
+            activity.emit(f"COVER selected={cover_label}")
 
             caption = (settings.REEL_CAPTION or "").replace(
                 "{username}", pick.username or "instagram").replace(
@@ -81,6 +87,8 @@ def run_once(*, settings, db, adapter) -> dict:
                              destination_media_id=dest_pk)
             counters["reels_uploaded"] = 1
             log.info("DATABASE completed media_id=%s dest=%s", pick.source_media_id, dest_pk)
+            activity.emit(f"UPLOAD success destination_media_id={dest_pk}")
+            activity.emit(f"DATABASE completed media_id={pick.source_media_id}")
             repo.finish_run(db, run_id, "success", "", **counters)
             return {
                 "status": "success",
@@ -94,6 +102,7 @@ def run_once(*, settings, db, adapter) -> dict:
             kind = adapter.classify_error(exc) if hasattr(adapter, "classify_error") else "unknown"
             log.error("PIPELINE failed media_id=%s kind=%s err=%r",
                       pick.source_media_id, kind, exc)
+            activity.emit(f"FAILED media_id={pick.source_media_id} kind={kind}")
             repo.mark_status(db, pick.source_media_id, dest, "FAILED", error=f"{kind}: {exc}")
             counters["reels_failed"] = 1
             repo.finish_run(db, run_id, "failed", f"{kind}: {exc}", **counters)
