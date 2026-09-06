@@ -214,6 +214,12 @@ def test_authorized_helper():
     assert not main._authorized("Bearer wrong", "also-wrong")
 
 
+def test_compat_patch_never_raises_without_library():
+    # instaharvest-v2 is not installed here (Termux) — patch must no-op.
+    from app.instagram import adapter
+    assert adapter.patch_missing_library_imports() == 0
+
+
 # ---------- cleanup ----------
 
 def test_cleanup_removes_tmp_files():
