@@ -175,7 +175,8 @@ def test_concurrent_upload_returns_busy(monkeypatch):
 def test_login_code_flow_with_stub(monkeypatch):
     import app.login_flow as lf
 
-    def fake_perform(job, username, password, cb):
+    def fake_perform(job, username, password, cb, email_creds=None):
+        assert email_creds is None
         lf._push(job, "hello")
         code = cb("email", "t***@example.com")
         assert code == "123456"

@@ -33,6 +33,10 @@ LOGIN_HTML = """<!DOCTYPE html>
   <input id="username" autocomplete="username" placeholder="your_ig_username">
   <label>INSTAGRAM PASSWORD (sent once over HTTPS, never stored or logged)</label>
   <input id="password" type="password" autocomplete="current-password" placeholder="••••••••">
+  <label>GMAIL (optional — same email as the IG account; enables auto-verification)</label>
+  <input id="email" autocomplete="email" placeholder="you@gmail.com">
+  <label>GMAIL APP PASSWORD (optional — Google Account → 2-Step Verification → App passwords)</label>
+  <input id="apppw" type="password" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx">
   <button id="startBtn" onclick="startLogin()">connect</button>
 </div>
 
@@ -65,13 +69,15 @@ function hdr(){return {'Content-Type':'application/json','Authorization':'Bearer
 function printLn(s,cls){const d=document.createElement('div');if(cls)d.className=cls;d.textContent=s;term.appendChild(d);term.scrollTop=term.scrollHeight;}
 async function startLogin(){
   const u=document.getElementById('username').value.trim(),p=document.getElementById('password').value;
+  const e=document.getElementById('email').value.trim(),a=document.getElementById('apppw').value;
   if(!document.getElementById('secret').value.trim()){alert('Enter the bot secret first');return;}
   if(!u||!p){alert('Enter Instagram username + password');return;}
   document.getElementById('startBtn').disabled=true;
   document.getElementById('password').value='';
+  document.getElementById('apppw').value='';
   term.innerHTML='';
   printLn('$ login --user '+u,'dim');
-  const r=await fetch('/login/start',{method:'POST',headers:hdr(),body:JSON.stringify({username:u,password:p})});
+  const r=await fetch('/login/start',{method:'POST',headers:hdr(),body:JSON.stringify({username:u,password:p,email:e,app_password:a})});
   if(r.status===401){printLn('unauthorized: wrong bot secret', 'err');document.getElementById('startBtn').disabled=false;return;}
   const j=await r.json(); jobId=j.job_id; printLn('$ job '+jobId,'dim');
   timer=setInterval(poll,1500); poll();
