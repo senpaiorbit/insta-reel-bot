@@ -7,6 +7,9 @@ Uncertain upload outcomes are NOT blindly retried.
 Resilience: walks ALL eligible candidates in feed order. A pick that proves
 undownloadable is marked FAILED (retryable later) and the next candidate is
 tried, instead of failing the whole run on the first pick.
+
+Publishing: the source Reel's original caption is copied verbatim (template
+fallback when empty); like/view counts are hidden unless disabled.
 """
 
 from __future__ import annotations
@@ -26,11 +29,26 @@ log = logging.getLogger(__name__)
 MAX_RESOLVE_ATTEMPTS = 5
 
 
-def run_once(*, settings, db, adapter) -> dict:
+def resolve_caption(pick, template: str) -> tuple[str, bool]:
+    """Use the source Reel's original caption; fall back to the template.
+
+    Returns (caption, copied_from_source).
+    """
+    original = (getattr(pick, "caption_text", "") or "").strip()
+    if original:
+        return original[:2200], True
+    rendered = (template or "").replace(
+        "{username}", getattr(pick, "username", "") or "instagram").replace(
+        "{shortcode}", getattr(pick, "shortcode", "") or "")
+    return rendered, False
+
+
+def run_once(*, settings, db, adapter, hide_counts: bool | None = None) -> dict:
     t0 = time.time()
     run_id = repo.start_run(db)
     counters = dict(reels_found=0, reels_skipped=0, reels_attempted=0,
                     reels_uploaded=0, reels_failed=0)
+    hide = settings.HIDE_LIKE_VIEW_COUNTS if hide_counts is None else hide_counts
     try:
         dest = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME
         if not dest:
@@ -78,7 +96,7 @@ def run_once(*, settings, db, adapter) -> dict:
                 continue  # try next eligible candidate
             result = _upload_picked(db=db, adapter=adapter, settings=settings,
                                     dest=dest, pick=pick, counters=counters,
-                                    run_id=run_id, t0=t0)
+                                    run_id=run_id, t0=t0, hide_counts=hide)
             return result
 
         repo.finish_run(db, run_id, "no_new_reel" if not last_error else "failed",
@@ -96,7 +114,7 @@ def run_once(*, settings, db, adapter) -> dict:
 
 
 def _upload_picked(*, db, adapter, settings, dest, pick, counters,
-                   run_id: int, t0: float) -> dict:
+                   run_id: int, t0: float, hide_counts: bool) -> dict:
     """Download -> cover -> upload -> COMPLETED for a resolved candidate."""
     video_path = None
     cover_label = ""
@@ -115,13 +133,12 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
         log.info("COVER selected=%s", cover_label)
         activity.emit(f"COVER selected={cover_label}")
 
-        caption = (settings.REEL_CAPTION or "").replace(
-            "{username}", pick.username or "instagram").replace(
-            "{shortcode}", pick.shortcode or "")
+        caption, copied = resolve_caption(pick, settings.REEL_CAPTION)
+        activity.emit(f"CAPTION {'copied original' if copied else 'template fallback'}")
         dest_pk = uploader.upload_reel(
             adapter, video_path=video_path, cover_path=cover_label,
             caption=caption, duration=pick.duration,
-            hide_counts=settings.HIDE_LIKE_VIEW_COUNTS)
+            hide_counts=hide_counts)
         repo.mark_status(db, pick.source_media_id, dest, "COMPLETED",
                          destination_media_id=dest_pk)
         counters["reels_uploaded"] = 1
@@ -135,6 +152,8 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             "source_shortcode": pick.shortcode,
             "destination_media_id": dest_pk,
             "cover": cover_label,
+            "caption_copied": copied,
+            "like_hidden": hide_counts,
             "elapsed_sec": round(time.time() - t0, 1),
         }
     except Exception as exc:  # noqa: BLE001 - must record + cleanup
