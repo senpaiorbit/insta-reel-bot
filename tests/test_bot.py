@@ -186,6 +186,8 @@ def test_upload_accepts_token_param(monkeypatch):
         r = client.post("/upload?token=test-secret")
         assert r.json()["status"] == "busy"
         assert client.post("/upload?token=wrong").status_code == 401
+        g = client.get("/upload?token=test-secret")
+        assert g.json()["status"] == "busy"
     finally:
         main._thread_lock.release()
 
