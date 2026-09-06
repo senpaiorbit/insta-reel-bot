@@ -101,13 +101,14 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/status")
-def status():
-    try:
-        info = repo.counts(get_db())
-    except Exception as exc:
-        return {"status": "degraded", "error": str(exc)[:300]}
-    return {"status": "ok", **info}
+@app.get("/ping")
+def ping():
+    """Ultra-light keep-alive for UptimeRobot: no DB, no Instagram, instant.
+
+    Ping every 5 min to beat Render Free's ~15 min sleep. Use a SEPARATE
+    monitor from /upload so wake-ups never trigger uploads.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/live")
