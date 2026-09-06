@@ -119,20 +119,24 @@ def api_debug(token: str | None = None,
             me = adapter._ig.account.get_current_user()
             out["account"] = getattr(me, "username", None) or "unknown"
         except Exception as exc:
-            out["account"] = f"unreadable: {type(exc).__name__}"
-        try:
-            raw = adapter._ig.feed.get_reels_feed(count=5)
-            if isinstance(raw, dict):
-                posts = raw.get("posts", raw.get("items", []))
-                out["reels_feed"] = {
-                    "keys": sorted(raw.keys())[:15],
-                    "posts": len(posts),
-                    "has_next": raw.get("has_next", raw.get("more_available")),
-                }
-            else:
-                out["reels_feed"] = {"type": type(raw).__name__}
-        except Exception as exc:
-            out["reels_feed"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+            out["account"] = f"unreadable: {type(exc).__name__}: {str(exc)[:200]}"
+        for name, call in (
+            ("reels_feed", lambda: adapter._ig.feed.get_reels_feed(count=12)),
+            ("timeline", lambda: adapter._ig.feed.get_timeline(count=5)),
+        ):
+            try:
+                raw = call()
+                if isinstance(raw, dict):
+                    posts = raw.get("posts", raw.get("items", []))
+                    out[name] = {
+                        "keys": sorted(raw.keys())[:15],
+                        "posts": len(posts),
+                        "has_next": raw.get("has_next", raw.get("more_available")),
+                    }
+                else:
+                    out[name] = {"type": type(raw).__name__}
+            except Exception as exc:
+                out[name] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
     except Exception as exc:
         out["auth"] = f"failed: {type(exc).__name__}: {str(exc)[:300]}"
     return out
