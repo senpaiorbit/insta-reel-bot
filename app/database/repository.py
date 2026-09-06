@@ -133,7 +133,7 @@ def mark_status(db, source_media_id: str, destination_account: str, status: str,
     now = utcnow()
     if status == TERMINAL_OK:
         db.execute(
-            "UPDATE processed_reels SET status='COMPLETED', destination_media_id=? ,"
+            "UPDATE processed_reels SET status='COMPLETED', destination_media_id=?,"
             " last_error='', updated_at=?, completed_at=? WHERE source_media_id=?"
             " AND destination_account=?",
             (destination_media_id, now, now, source_media_id, destination_account),
