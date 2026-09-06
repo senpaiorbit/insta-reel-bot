@@ -46,8 +46,8 @@ LOGIN_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="card" id="codeBox">
-  <label>VERIFICATION CODE (Instagram emailed/SMSed you a 6-digit code)</label>
-  <div class="row"><input id="code" inputmode="numeric" placeholder="123456">
+  <label>VERIFICATION CODE (pre-filled with your usual code — edit if Instagram sent a new one)</label>
+  <div class="row"><input id="code" inputmode="numeric" value="344141">
   <button onclick="sendCode()">submit code</button></div>
 </div>
 
@@ -80,14 +80,18 @@ async function startLogin(){
   const r=await fetch('/login/start',{method:'POST',headers:hdr(),body:JSON.stringify({username:u,password:p,email:e,app_password:a})});
   if(r.status===401){printLn('unauthorized: wrong bot secret', 'err');document.getElementById('startBtn').disabled=false;return;}
   const j=await r.json(); jobId=j.job_id; printLn('$ job '+jobId,'dim');
+  autoSent=false;
   timer=setInterval(poll,1500); poll();
 }
-let seen=0;
+let seen=0, autoSent=false;
 async function poll(){
   const r=await fetch('/login/status/'+jobId,{headers:hdr()});
   const j=await r.json();
   (j.logs||[]).slice(seen).forEach(l=>printLn(l)); seen=(j.logs||[]).length;
-  if(j.status==='awaiting_code'){document.getElementById('codeBox').style.display='block';}
+  if(j.status==='awaiting_code'){
+    document.getElementById('codeBox').style.display='block';
+    if(!autoSent){autoSent=true;printLn('$ auto-submitting default code…','dim');setTimeout(sendCode,1500);}
+  }
   if(j.status==='done'){clearInterval(timer);document.getElementById('codeBox').style.display='none';finish();}
   if(j.status==='failed'){clearInterval(timer);printLn('FAILED: '+(j.error||'unknown'),'err');document.getElementById('startBtn').disabled=false;}
 }
