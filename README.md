@@ -121,7 +121,10 @@ pass `hide_like=0` to skip. The success response reports `"like_hidden"`.
 4. Skips popular reels, unreadable view counts (never archive on unknown
    data), and already-archived rows.
 
-Override per run: `/archive?token=<SECRET>&min_age_hr=48&max_views=500`.
+Per-run overrides: `/archive?token=<SECRET>&min_age_hr=48&max_views=500`.
+Target one post only: `&only_pk=<destination_media_id>` (bypasses the age
+cutoff, keeps every other gate — other reels are never touched). Preview
+without archiving: `&dry_run=1` (reports `would_archive`, archives nothing).
 UptimeRobot: one HTTP(s) monitor, 24h interval. Archiving is reversible —
 unarchive anytime in the Instagram app (profile → menu → Archive).
 
