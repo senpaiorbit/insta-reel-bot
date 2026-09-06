@@ -102,6 +102,7 @@ def health():
 
 
 @app.get("/ping")
+@app.head("/ping")
 def ping():
     """Ultra-light keep-alive for UptimeRobot: no DB, no Instagram, instant.
 
