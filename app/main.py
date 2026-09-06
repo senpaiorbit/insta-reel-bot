@@ -8,8 +8,11 @@ import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
+from app import login_flow
+from app import login_page
 from app.config import get_settings
 from app.database import repository as repo
 from app.database.db import TursoClient
@@ -108,3 +111,69 @@ def upload(authorization: str | None = Header(default=None)):
             repo.release_lock(db)
         except Exception:
             pass
+
+
+# ---------------- interactive login helper ----------------
+
+class LoginStart(BaseModel):
+    username: str
+    password: str
+
+
+class LoginCode(BaseModel):
+    job_id: str
+    code: str
+
+
+@app.get("/login")
+def login_ui():
+    """Terminal-style page: enter IG credentials, watch log, get session JSON."""
+    return HTMLResponse(login_page.LOGIN_HTML)
+
+
+@app.post("/login/start")
+def login_start(body: LoginStart, authorization: str | None = Header(default=None)):
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if not body.username or not body.password:
+        raise HTTPException(status_code=400, detail="username and password required")
+    job_id = login_flow.start_job(body.username.strip(), body.password)
+    return {"job_id": job_id}
+
+
+@app.get("/login/status/{job_id}")
+def login_status(job_id: str, authorization: str | None = Header(default=None)):
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    job = login_flow.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown or expired job")
+    return {
+        "status": job.status,
+        "logs": job.logs,
+        "challenge": {"type": job.challenge_type, "contact": job.contact_point}
+        if job.status == "awaiting_code" else None,
+        "error": job.error,
+        "account_username": job.account_username,
+    }
+
+
+@app.post("/login/code")
+def login_code(body: LoginCode, authorization: str | None = Header(default=None)):
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    if not login_flow.submit_code(body.job_id, body.code):
+        raise HTTPException(status_code=404, detail="unknown job or no code requested")
+    return {"ok": True}
+
+
+@app.get("/login/session/{job_id}")
+def login_session(job_id: str, authorization: str | None = Header(default=None)):
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    job = login_flow.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown or expired job")
+    if job.status != "done" or not job.session_json:
+        raise HTTPException(status_code=409, detail=f"session not ready (status={job.status})")
+    return {"session": job.session_json, "account_username": job.account_username}
