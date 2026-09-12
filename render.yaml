@@ -39,5 +39,7 @@ services:
         value: 900
       - key: HIDE_LIKE_VIEW_COUNTS
         value: true
+      - key: SHARE_TO_FEED
+        value: true
       - key: LOG_LEVEL
         value: INFO
