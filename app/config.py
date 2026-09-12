@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     ARCHIVE_MIN_AGE_HR: int = 24
     ARCHIVE_MAX_VIEWS: int = 900
 
+    # Proxy (optional): empty means direct connection.
+    PROXY_URL: str = ""  # e.g. http://user:pass@host:port or socks5h://host:port — empty means direct
+
+    # Telegram logs (optional, off by default).
+    TELEGRAM_ENABLED: bool = False
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+
     LOG_LEVEL: str = "INFO"
     BASE_DIR: str = str(Path(__file__).resolve().parent.parent)
 
