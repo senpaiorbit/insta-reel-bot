@@ -95,6 +95,22 @@ def parse_hide_like(value: str | None, default: bool) -> bool:
     return value.strip().lower() not in ("0", "false", "no", "off")
 
 
+def parse_logbot(value: str | None) -> bool | None:
+    """Parse ?logbot= tri-state. Absent -> None (global TELEGRAM_ENABLED wins).
+
+    1/true/yes/on -> True (force Telegram for this run);
+    0/false/no/off -> False (silence this run).
+    """
+    if value is None or value == "":
+        return None
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 @app.get("/")
 @app.get("/health")
 def health():
@@ -263,6 +279,7 @@ def archive(token: str | None = None,
             max_views: int | None = None,
             only_pk: str | None = None,
             dry_run: int | None = None,
+            logbot: str | None = None,
             authorization: str | None = Header(default=None)):
     """One auto-archive pass. GET works from a browser; hit every 24h.
 
@@ -299,14 +316,36 @@ def archive(token: str | None = None,
         activity.emit("ARCHIVE request accepted — starting pass")
         from app.archiver import run_archive
         from app.instagram.client import create_client
+        from app.notify import notify as _notify_archive
+        logbot_override = parse_logbot(logbot)
+        try:
+            _notify_archive(settings, "▶️ archive pass started", force=logbot_override)
+        except Exception:
+            pass
         adapter = create_client(settings)
         result = run_archive(settings=settings, db=db, adapter=adapter,
                              min_age_hr=age, max_views=views,
                              dry_run=bool(dry_run), only_pk=only_pk or "")
+        try:
+            _notify_archive(
+                settings,
+                f"✅ archive pass done: {result.get('archived', '?')} archived"
+                f" / {result.get('checked', '?')} checked",
+                force=logbot_override)
+        except Exception:
+            pass
         return JSONResponse(result, status_code=200)
     except Exception as exc:
         log.error("ARCHIVE pass crashed: %r", exc)
         activity.emit(f"ARCHIVE pass crashed: {type(exc).__name__}")
+        try:
+            from app.notify import notify as _notify_archive_err
+            _notify_archive_err(
+                settings,
+                f"❌ archive pass crashed: {type(exc).__name__}: {str(exc)[:200]}",
+                force=parse_logbot(logbot))
+        except Exception:
+            pass
         return JSONResponse({"status": "failed",
                              "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
                             status_code=500)
@@ -322,12 +361,16 @@ def archive(token: str | None = None,
 def upload(token: str | None = None,
            hide_like: str | None = None,
            cover_url: str | None = None,
+           logbot: str | None = None,
            authorization: str | None = Header(default=None)):
     """Trigger one upload cycle. GET works from a browser address bar.
     hide_like: 1 (default) hides like/view counts, 0 leaves them visible.
     cover_url: optional per-upload cover image URL; falls back to COVER_URL
     env when absent. URL covers are downloaded once and cached in
-    /tmp/covers until the URL changes (overrides COVER_MODE when set)."""
+    /tmp/covers until the URL changes (overrides COVER_MODE when set).
+    logbot: 1 forces a Telegram log for this run, 0 silences it
+    (absent = global TELEGRAM_ENABLED wins).
+    Example: /upload?token=SECRET&logbot=1."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
     hide = parse_hide_like(hide_like, settings.HIDE_LIKE_VIEW_COUNTS)
@@ -361,7 +404,8 @@ def upload(token: str | None = None,
                           else getattr(settings, "COVER_URL", ""))
         result = run_once(settings=settings, db=db, adapter=adapter,
                           hide_counts=hide,
-                          cover_url_override=cover_override)
+                          cover_url_override=cover_override,
+                          notify_override=parse_logbot(logbot))
         code = 200 if result.get("status") in ("success", "no_new_reel") else 500
         return JSONResponse(result, status_code=code)
     finally:
