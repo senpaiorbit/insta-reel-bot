@@ -321,9 +321,13 @@ def archive(token: str | None = None,
 @app.api_route("/upload", methods=["GET", "POST"])
 def upload(token: str | None = None,
            hide_like: str | None = None,
+           cover_url: str | None = None,
            authorization: str | None = Header(default=None)):
     """Trigger one upload cycle. GET works from a browser address bar.
-    hide_like: 1 (default) hides like/view counts, 0 leaves them visible."""
+    hide_like: 1 (default) hides like/view counts, 0 leaves them visible.
+    cover_url: optional per-upload cover image URL; falls back to COVER_URL
+    env when absent. URL covers are downloaded once and cached in
+    /tmp/covers until the URL changes (overrides COVER_MODE when set)."""
     if not _authorized(authorization, token):
         raise HTTPException(status_code=401, detail="unauthorized")
     hide = parse_hide_like(hide_like, settings.HIDE_LIKE_VIEW_COUNTS)
@@ -350,8 +354,14 @@ def upload(token: str | None = None,
         from app.instagram.client import create_client
         from app.worker import run_once
         adapter = create_client(settings)
+        # Per-upload ?cover_url= overrides settings.COVER_URL for this run
+        # only (explicit pass-through, no global mutation).
+        cover_override = (cover_url.strip()
+                          if cover_url and cover_url.strip()
+                          else getattr(settings, "COVER_URL", ""))
         result = run_once(settings=settings, db=db, adapter=adapter,
-                          hide_counts=hide)
+                          hide_counts=hide,
+                          cover_url_override=cover_override)
         code = 200 if result.get("status") in ("success", "no_new_reel") else 500
         return JSONResponse(result, status_code=code)
     finally:
