@@ -102,6 +102,7 @@ but don't share the bookmarked link publicly.
 | `UPLOAD_SECRET` | ✅ | — | Secret for `/upload` + `/archive` (header or `?token=`) and `/live` |
 | `REEL_FETCH_COUNT` | — | 30 | Candidates per run |
 | `HIDE_LIKE_VIEW_COUNTS` | — | true | Default for hiding counts; `hide_like` overrides per run |
+| `SHARE_TO_FEED` | — | true | Share reel preview to profile grid/feed (`false` = Reels tab only) |
 | `COVER_MODE` | — | random | `random`/`sequential`/`fixed` |
 | `COVER_FILE` | for fixed | — | e.g. `cover/1.png` |
 | `REEL_CAPTION` | — | 🎬 via @{username} #reels | Fallback template when source has no caption |
@@ -126,6 +127,21 @@ uploader performs the publish itself and sets
 `like_and_view_counts_disabled=1` on `configure_to_clips` (verified wire
 parameter, same as instagrapi/goinsta use). Counts are hidden by default;
 pass `hide_like=0` to skip. The success response reports `"like_hidden"`.
+
+## Share to feed — reels also appear in the profile grid
+
+`instaharvest-v2`'s `post_reel()` exposes no feed-preview option, so the
+uploader performs the publish itself and sets
+`clips_share_preview_to_feed=1` on `configure_to_clips` (verified wire
+parameter — the same one instagrapi sends for
+`clip_upload(show_preview_in_feed=True)`). Without it Instagram defaults to
+Reels-tab-only: the reel never shows in the profile grid and the post count
+doesn't go up. Sharing is on by default (`SHARE_TO_FEED=true`); set
+`SHARE_TO_FEED=false` to opt out back to Reels-tab-only. The success
+response reports `"shared_to_feed": true/false`. Note: this applies to reels
+uploaded after the change — already-posted Reels-tab-only reels can only be
+fixed in the Instagram app (open the reel → ⋯ → "Add to profile grid", or
+re-upload).
 
 ## Auto-archive — daily flop cleanup
 
