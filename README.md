@@ -108,7 +108,36 @@ but don't share the bookmarked link publicly.
 | `REEL_CAPTION` | — | 🎬 via @{username} #reels | Fallback template when source has no caption |
 | `ARCHIVE_MIN_AGE_HR` | — | 24 | `/archive`: only reels older than this (hours) |
 | `ARCHIVE_MAX_VIEWS` | — | 900 | `/archive`: archive reels below this view count |
+| `PROXY_URL` | — | — (direct) | Optional proxy (`http://user:pass@host:port` or `socks5h://host:port`); empty = direct |
+| `TELEGRAM_ENABLED` | — | false | Telegram run logs on/off |
+| `TELEGRAM_BOT_TOKEN` | when enabled | — | Bot token from @BotFather (keep secret, env only) |
+| `TELEGRAM_CHAT_ID` | when enabled | — | Numeric chat id that receives the logs |
 | `LOG_LEVEL` | — | INFO | — |
+
+## Proxy (optional)
+
+- Leave `PROXY_URL` empty for a direct connection (default, 100% optional).
+- Set `PROXY_URL=http://user:pass@host:port` (or `https://…`, `socks5://…`,
+  `socks5h://…`) to route Instagram traffic through a proxy.
+- Invalid scheme/host → a warning is logged and the run continues direct.
+- Only the proxy host is ever logged — credentials are never logged.
+
+## Telegram logs (optional, off by default)
+
+- `TELEGRAM_ENABLED=false` by default — set to `true` to log every run.
+- Setup: talk to **@BotFather** → `/newbot` → copy the bot token into
+  `TELEGRAM_BOT_TOKEN`; message your bot once, then open
+  `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your numeric
+  `chat id` → `TELEGRAM_CHAT_ID`. (No real values belong in the repo —
+  env names only.)
+- Per-request override (works even when globally off):
+  `/upload?token=SECRET&logbot=1` forces Telegram for that run;
+  `/upload?token=SECRET&logbot=0` silences it. Same `?logbot=` param on
+  `/archive`. Accepts `1/true/yes/on` and `0/false/no/off`.
+- Logged events: run started (`run_id`), success (shortcode + destination
+  id + elapsed), failed (shortcode + error kind, truncated). Never includes
+  secrets, session material, or caption text. A Telegram failure never
+  breaks the pipeline.
 
 ## Database & deduplication
 
