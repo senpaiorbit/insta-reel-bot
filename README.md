@@ -1,9 +1,28 @@
 # Instagram Reel Automation Bot
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/senpaiorbit/insta-reel-bot)
+
 Production-ready Python service. Three UptimeRobot monitors drive it: a
 5-minute `/ping` keep-alive (beats Render Free sleep), a scheduled
 `/upload` that posts one new Reel per hit, and a daily `/archive` that
 archives flops (older than 24h, under 900 views).
+
+## One-click deploy
+
+1. Click **Deploy to Render** above.
+2. Connect your GitHub account and select this repo.
+3. Build `pip install -r requirements.txt` + start `uvicorn app.main:app --host 0.0.0.0 --port $PORT` are auto-filled from `render.yaml`.
+4. Fill `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `INSTAGRAM_SESSION`, `DESTINATION_USERNAME`, `UPLOAD_SECRET`, `COVER_URL`.
+5. Click **Deploy**.
+
+## Cover via URL (no fork needed)
+
+- Set the `COVER_URL` env (e.g. `https://i.ibb.co/sp6WvzJK/1.jpg`) — it
+  overrides `COVER_MODE` when set — or pass a per-upload
+  `?cover_url=` query param: `/upload?token=<SECRET>&cover_url=https://i.ibb.co/sp6WvzJK/1.jpg`.
+- The image is downloaded once and cached in `/tmp/covers` (filename =
+  `sha256(url)` + ext) until the URL changes (a new URL = new hash = new file).
+- Allowed extensions: `.png/.jpg/.jpeg/.webp` (URL path ext, defaults to `.jpg`).
 
 ## Verified InstaHarvest v2 API surface (don't guess — this is checked)
 
