@@ -41,6 +41,7 @@ class Settings(BaseSettings):
 
     # Publishing
     HIDE_LIKE_VIEW_COUNTS: bool = True  # honored only if library supports it (it doesn't)
+    SHARE_TO_FEED: bool = True  # also share reel preview to profile grid/feed (False = Reels tab only)
     REEL_CAPTION: str = "🎬 via @{username} #reels"
 
     # Auto-archive (/archive hit every 24h): reels older than this, with
