@@ -30,8 +30,52 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
+
+PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+
+
+def proxy_host_for_log(proxy_url: str) -> str:
+    """Host (never credentials) for safe logging."""
+    try:
+        parsed = urlparse((proxy_url or "").strip())
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return host or "(unparseable)"
+    except Exception:
+        return "(unparseable)"
+
+
+def is_valid_proxy(proxy_url: str) -> bool:
+    """Scheme must be http/https/socks5/socks5h with a host."""
+    try:
+        parsed = urlparse((proxy_url or "").strip())
+        return parsed.scheme.lower() in PROXY_SCHEMES and bool(parsed.hostname)
+    except Exception:
+        return False
+
+
+def apply_proxy_env(proxy_url: str) -> bool:
+    """Set HTTP(S)_PROXY (and ALL_PROXY for socks) for libraries without
+    a proxy constructor param. Returns True when applied, False (direct)
+    when empty/invalid. Logs host only, never credentials."""
+    proxy_url = (proxy_url or "").strip()
+    if not proxy_url:
+        return False
+    if not is_valid_proxy(proxy_url):
+        log.warning("PROXY invalid scheme/host, running direct (host=%s)",
+                    proxy_host_for_log(proxy_url))
+        return False
+    scheme = urlparse(proxy_url).scheme.lower()
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    if scheme in ("socks5", "socks5h"):
+        os.environ["ALL_PROXY"] = proxy_url
+    log.info("PROXY enabled host=%s scheme=%s", proxy_host_for_log(proxy_url), scheme)
+    return True
 
 # Upstream bug (installed instaharvest-v2): several modules call bare
 # ``build_request_headers(...)`` without importing it — the real function
@@ -202,7 +246,7 @@ class InstagramAdapter:
         self.session_file = session_file
 
     # -- construction -----------------------------------------------------
-    def _new_client(self) -> Any:
+    def _new_client(self, proxy_url: str = "") -> Any:
         try:
             from instaharvest_v2 import Instagram
         except ImportError as exc:
@@ -211,16 +255,39 @@ class InstagramAdapter:
                 "Add 'instaharvest-v2' to requirements.txt and deploy to Render."
             ) from exc
         patch_missing_library_imports()
+        proxy_url = (proxy_url or "").strip()
+        if proxy_url:
+            if not is_valid_proxy(proxy_url):
+                log.warning("PROXY invalid scheme/host, running direct (host=%s)",
+                            proxy_host_for_log(proxy_url))
+            else:
+                # Prefer a native constructor proxy param when the installed
+                # library accepts one; otherwise fall back to env vars.
+                try:
+                    import inspect as _inspect
+                    params = _inspect.signature(Instagram.__init__).parameters
+                    names = {n.lower() for n in params}
+                    for cand in ("proxy", "proxy_url", "proxies", "http_proxy"):
+                        if cand in names:
+                            real = next(n for n in params if n.lower() == cand)
+                            log.info("PROXY enabled host=%s via ctor param=%s",
+                                     proxy_host_for_log(proxy_url), real)
+                            return Instagram(**{real: proxy_url})
+                except Exception as exc:
+                    log.warning("PROXY ctor probe failed, using env fallback: %r", exc)
+                apply_proxy_env(proxy_url)
+                return Instagram()
         return Instagram()
 
     def load_session(self, *, username: str = "", password: str = "",
-                     session_blob: str = "", env_cookies: dict | None = None) -> Any:
+                      session_blob: str = "", env_cookies: dict | None = None,
+                      proxy_url: str = "") -> Any:
         """Restore session without persisting anything outside /tmp.
 
         Precedence: INSTAGRAM_SESSION blob (raw/base64 session.json) >
         SESSION_ID/CSRF_TOKEN/DS_USER_ID cookies via from_env > fresh login.
         """
-        ig = self._new_client()
+        ig = self._new_client(proxy_url=proxy_url)
         blob = (session_blob or "").strip()
         if blob:
             data = blob
@@ -249,6 +316,9 @@ class InstagramAdapter:
         try:
             from instaharvest_v2 import Instagram as IG
             if os.environ.get("SESSION_ID"):
+                # NOTE: from_env() builds its own client, bypassing the
+                # proxy ctor param; the HTTP(S)_PROXY/ALL_PROXY env fallback
+                # (applied in create_client) still routes it when PROXY_URL set.
                 ig = IG.from_env()
                 log.info("AUTH session loaded via from_env cookies")
                 return self._validated(ig)
