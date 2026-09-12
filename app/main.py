@@ -47,11 +47,30 @@ def get_db() -> TursoClient:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        try:
+            from app.instagram.downloader import sweep_stale_tmp
+            sweep_stale_tmp()  # best-effort, never raises
+        except Exception as exc:
+            log.warning("STARTUP tmp sweep skipped: %r", exc)
         get_db()  # create tables idempotently on startup
         log.info("STARTUP schema ready")
     except Exception as exc:
         log.error("STARTUP schema init failed (will retry per-request): %r", exc)
     yield
+    try:  # shutdown: close the global TursoClient best-effort
+        global _db
+        _db_local, _db = _db, None
+        if _db_local is not None:
+            for _meth in ("close", "shutdown"):
+                try:
+                    _fn = getattr(_db_local, _meth, None)
+                    if callable(_fn):
+                        _fn()
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
 
 
 app = FastAPI(title="Instagram Reel Bot", lifespan=lifespan)
