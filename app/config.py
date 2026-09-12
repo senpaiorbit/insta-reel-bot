@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     COVER_MODE: str = "random"  # random | sequential | fixed
     COVER_FILE: str = ""  # e.g. cover/1.png when COVER_MODE=fixed
     COVER_DIR: str = "cover"
+    COVER_URL: str = ""  # e.g. https://i.ibb.co/sp6WvzJK/1.jpg - downloaded once, cached until URL changes
 
     # Publishing
     HIDE_LIKE_VIEW_COUNTS: bool = True  # honored only if library supports it (it doesn't)
