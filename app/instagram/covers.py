@@ -10,8 +10,20 @@ from urllib.parse import urlparse
 
 ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
+# /tmp/covers age/size cap: ephemeral on Render Free (512MB RAM, /tmp
+# cleared on restart/sleep). URL_MAP is bounded below (max 50, oldest-first
+# eviction); rely on container restart for full /tmp/covers clear.
 CACHE_DIR = Path("/tmp/covers")
 URL_MAP: dict[str, Path] = {}
+MAX_URL_MAP_ENTRIES = 50
+
+
+def _cache_put(url: str, dest: Path) -> None:
+    """Bound URL_MAP to the last 50 entries (oldest-first eviction)."""
+    _cache_put(url, dest)
+    while len(URL_MAP) > MAX_URL_MAP_ENTRIES:
+        URL_MAP.pop(next(iter(URL_MAP)))
+
 
 MAX_COVER_BYTES = 10 * 1024 * 1024  # ~10MB cap for URL covers
 
@@ -48,7 +60,7 @@ def cover_from_url(url: str) -> Path:
     if cached is not None and cached.is_file() and cached.stat().st_size > 0:
         return cached
     if dest.is_file() and dest.stat().st_size > 0:
-        URL_MAP[url] = dest
+        _cache_put(url, dest)
         log.info("COVER cache-hit path=%s url=%.80s", dest, url)
         return dest
 
@@ -93,7 +105,7 @@ def cover_from_url(url: str) -> Path:
     if dest.stat().st_size == 0:
         dest.unlink(missing_ok=True)
         raise ValueError(f"Cover is empty: {dest}")
-    URL_MAP[url] = dest
+    _cache_put(url, dest)
     log.info("COVER downloaded path=%s bytes=%d url=%.80s", dest, size, url)
     return dest
 
