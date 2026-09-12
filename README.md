@@ -130,7 +130,7 @@ but don't share the bookmarked link publicly.
   `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your numeric
   `chat id` → `TELEGRAM_CHAT_ID`. (No real values belong in the repo —
   env names only.)
-- Per-request override (works even when globally off):
+- Per-request override (works even when globally off): `?logbot=1/0` —
   `/upload?token=SECRET&logbot=1` forces Telegram for that run;
   `/upload?token=SECRET&logbot=0` silences it. Same `?logbot=` param on
   `/archive`. Accepts `1/true/yes/on` and `0/false/no/off`.
