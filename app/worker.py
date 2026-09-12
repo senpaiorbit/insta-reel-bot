@@ -22,8 +22,17 @@ from app.database import repository as repo
 from app.instagram import covers as cover_mod
 from app.instagram import downloader, uploader
 from app.instagram.discovery import filter_candidates
+from app.notify import notify as _notify
 
 log = logging.getLogger(__name__)
+
+
+def _safe_notify(settings, text: str, override: bool | None) -> None:
+    """Telegram hook that can never break the pipeline."""
+    try:
+        _notify(settings, text, force=override)
+    except Exception as exc:  # noqa: BLE001 - notify must never raise
+        log.warning("NOTIFY suppressed: %r", exc)
 
 # Max per-run video-URL resolutions (each costs Instagram API calls).
 MAX_RESOLVE_ATTEMPTS = 5
@@ -44,9 +53,11 @@ def resolve_caption(pick, template: str) -> tuple[str, bool]:
 
 
 def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
-             cover_url_override: str | None = None) -> dict:
+             cover_url_override: str | None = None,
+             notify_override: bool | None = None) -> dict:
     t0 = time.time()
     run_id = repo.start_run(db)
+    _safe_notify(settings, f"▶️ run #{run_id} started", notify_override)
     counters = dict(reels_found=0, reels_skipped=0, reels_attempted=0,
                     reels_uploaded=0, reels_failed=0)
     hide = settings.HIDE_LIKE_VIEW_COUNTS if hide_counts is None else hide_counts
@@ -98,12 +109,16 @@ def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
             result = _upload_picked(db=db, adapter=adapter, settings=settings,
                                     dest=dest, pick=pick, counters=counters,
                                     run_id=run_id, t0=t0, hide_counts=hide,
-                                    cover_url_override=cover_url_override)
+                                    cover_url_override=cover_url_override,
+                                    notify_override=notify_override)
             return result
 
         repo.finish_run(db, run_id, "no_new_reel" if not last_error else "failed",
                         last_error, **counters)
         if last_error:
+            _safe_notify(settings,
+                         f"❌ run #{run_id} failed: {str(last_error)[:200]}",
+                         notify_override)
             return {"status": "failed", "error": last_error}
         return {"status": "no_new_reel", **counters}
     except Exception as exc:  # noqa: BLE001 - feed/auth-level failure
@@ -112,12 +127,16 @@ def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
             repo.finish_run(db, run_id, "failed", str(exc), **counters)
         except Exception:
             pass
+        _safe_notify(settings,
+                     f"❌ run #{run_id} failed: {type(exc).__name__}: {str(exc)[:200]}",
+                     notify_override)
         return {"status": "failed", "error": str(exc)[:500]}
 
 
 def _upload_picked(*, db, adapter, settings, dest, pick, counters,
                    run_id: int, t0: float, hide_counts: bool,
-                   cover_url_override: str | None = None) -> dict:
+                   cover_url_override: str | None = None,
+                   notify_override: bool | None = None) -> dict:
     """Download -> cover -> upload -> COMPLETED for a resolved candidate."""
     video_path = None
     cover_label = ""
@@ -160,6 +179,12 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
         activity.emit(f"UPLOAD success destination_media_id={dest_pk}")
         activity.emit(f"DATABASE completed media_id={pick.source_media_id}")
         repo.finish_run(db, run_id, "success", "", **counters)
+        elapsed = round(time.time() - t0, 1)
+        _safe_notify(
+            settings,
+            f"✅ run #{run_id} uploaded {pick.shortcode or pick.source_media_id}"
+            f" → {dest_pk} in {elapsed}s",
+            notify_override)
         return {
             "status": "success",
             "source_media_id": pick.source_media_id,
@@ -169,7 +194,7 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             "caption_copied": copied,
             "like_hidden": hide_counts,
             "shared_to_feed": bool(share),
-            "elapsed_sec": round(time.time() - t0, 1),
+            "elapsed_sec": elapsed,
         }
     except Exception as exc:  # noqa: BLE001 - must record + cleanup
         kind = adapter.classify_error(exc) if hasattr(adapter, "classify_error") else "unknown"
@@ -179,6 +204,12 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
         repo.mark_status(db, pick.source_media_id, dest, "FAILED", error=f"{kind}: {exc}")
         counters["reels_failed"] = 1
         repo.finish_run(db, run_id, "failed", f"{kind}: {exc}", **counters)
+        _safe_notify(
+            settings,
+            f"❌ run #{run_id} failed"
+            f" {pick.shortcode or pick.source_media_id}:"
+            f" {kind}: {str(exc)[:200]}",
+            notify_override)
         return {"status": "failed", "error": f"{kind}: {exc}",
                 "source_media_id": pick.source_media_id}
     finally:
