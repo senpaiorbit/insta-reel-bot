@@ -93,6 +93,9 @@ def patch_missing_library_imports() -> int:
 
 # Feature-detection results (honest reporting, never faked).
 SUPPORTS_HIDDEN_COUNTS = False  # verified: post_reel() has no such parameter
+SUPPORTS_SHARE_TO_FEED = False  # verified: post_reel() has no such parameter;
+# share-to-feed is applied via uploader.upload_reel, which sets
+# clips_share_preview_to_feed on its own configure_to_clips call.
 SUPPORTS_REEL_COVER = True  # via thumbnail_path / thumbnail_data on post_reel()
 REELS_FEED_SIGNATURE = "get_reels_feed(count=20, cursor=None) -> {posts, has_next, end_cursor, count}"
 
@@ -390,13 +393,25 @@ class InstagramAdapter:
         return str(pk or "")
 
     def upload_reel(self, *, video_path: str, cover_path: str | None,
-                    caption: str = "", duration: float = 0.0) -> str:
-        """Upload via ig.upload.post_reel(); returns destination media pk."""
+                    caption: str = "", duration: float = 0.0,
+                    share_to_feed: bool = True) -> str:
+        """Upload via ig.upload.post_reel(); returns destination media pk.
+
+        share_to_feed is accepted for call-compatibility with
+        uploader.upload_reel, but post_reel() exposes no such parameter
+        (see SUPPORTS_SHARE_TO_FEED) so the library path cannot honor it —
+        the production path (uploader.upload_reel -> configure_to_clips
+        with clips_share_preview_to_feed) is what puts reels in the grid.
+        """
         kwargs: dict[str, Any] = {"video_path": video_path, "caption": caption or ""}
         if duration:
             kwargs["duration"] = float(duration)
         if cover_path:
             kwargs["thumbnail_path"] = cover_path
+        if not share_to_feed:
+            log.warning("UPLOAD share_to_feed=False ignored: post_reel() "
+                        "has no feed-preview parameter (Reels-tab-only not "
+                        "expressible on this path)")
         log.info("UPLOAD started video=%s cover=%s", video_path, cover_path)
         result = self._ig.upload.post_reel(**kwargs)
         pk = self._extract_media_pk(result)
