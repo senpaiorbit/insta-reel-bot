@@ -144,10 +144,15 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
 
         caption, copied = resolve_caption(pick, settings.REEL_CAPTION)
         activity.emit(f"CAPTION {'copied original' if copied else 'template fallback'}")
+        # SHARE_TO_FEED (default True): reel preview also appears in the
+        # profile grid / post count. False = Reels tab only.
+        share = getattr(settings, "SHARE_TO_FEED", True)
+        if share is None:
+            share = True
         dest_pk = uploader.upload_reel(
             adapter, video_path=video_path, cover_path=cover_label,
             caption=caption, duration=pick.duration,
-            hide_counts=hide_counts)
+            hide_counts=hide_counts, share_to_feed=bool(share))
         repo.mark_status(db, pick.source_media_id, dest, "COMPLETED",
                          destination_media_id=dest_pk)
         counters["reels_uploaded"] = 1
@@ -163,6 +168,7 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             "cover": cover_label,
             "caption_copied": copied,
             "like_hidden": hide_counts,
+            "shared_to_feed": bool(share),
             "elapsed_sec": round(time.time() - t0, 1),
         }
     except Exception as exc:  # noqa: BLE001 - must record + cleanup
