@@ -43,7 +43,8 @@ def resolve_caption(pick, template: str) -> tuple[str, bool]:
     return rendered, False
 
 
-def run_once(*, settings, db, adapter, hide_counts: bool | None = None) -> dict:
+def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
+             cover_url_override: str | None = None) -> dict:
     t0 = time.time()
     run_id = repo.start_run(db)
     counters = dict(reels_found=0, reels_skipped=0, reels_attempted=0,
@@ -96,7 +97,8 @@ def run_once(*, settings, db, adapter, hide_counts: bool | None = None) -> dict:
                 continue  # try next eligible candidate
             result = _upload_picked(db=db, adapter=adapter, settings=settings,
                                     dest=dest, pick=pick, counters=counters,
-                                    run_id=run_id, t0=t0, hide_counts=hide)
+                                    run_id=run_id, t0=t0, hide_counts=hide,
+                                    cover_url_override=cover_url_override)
             return result
 
         repo.finish_run(db, run_id, "no_new_reel" if not last_error else "failed",
@@ -114,7 +116,8 @@ def run_once(*, settings, db, adapter, hide_counts: bool | None = None) -> dict:
 
 
 def _upload_picked(*, db, adapter, settings, dest, pick, counters,
-                   run_id: int, t0: float, hide_counts: bool) -> dict:
+                   run_id: int, t0: float, hide_counts: bool,
+                   cover_url_override: str | None = None) -> dict:
     """Download -> cover -> upload -> COMPLETED for a resolved candidate."""
     video_path = None
     cover_label = ""
@@ -125,9 +128,15 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             max_bytes=settings.MAX_VIDEO_BYTES)
         activity.emit(f"DOWNLOADED media_id={pick.source_media_id}")
 
+        # COVER_URL env (or per-upload ?cover_url= override) wins over
+        # COVER_MODE when set; downloaded once and cached until URL changes.
+        effective_cover_url = (cover_url_override
+                               if cover_url_override is not None
+                               else getattr(settings, "COVER_URL", ""))
         cover = cover_mod.select_cover(
             mode=settings.COVER_MODE, cover_dir=settings.COVER_DIR,
-            fixed_file=settings.COVER_FILE, db=db)
+            fixed_file=settings.COVER_FILE, db=db,
+            cover_url=effective_cover_url or "")
         cover_mod.validate_cover(cover)
         cover_label = str(cover)
         log.info("COVER selected=%s", cover_label)
