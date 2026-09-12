@@ -27,6 +27,16 @@ services:
         value: 30
       - key: COVER_MODE
         value: random
+      - key: COVER_FILE
+        sync: false
+      - key: COVER_DIR
+        value: cover
+      - key: COVER_URL
+        sync: false
+      - key: ARCHIVE_MIN_AGE_HR
+        value: 24
+      - key: ARCHIVE_MAX_VIEWS
+        value: 900
       - key: HIDE_LIKE_VIEW_COUNTS
         value: true
       - key: LOG_LEVEL
