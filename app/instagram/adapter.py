@@ -28,6 +28,7 @@ import binascii
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -580,7 +581,8 @@ class InstagramAdapter:
         comment id; ``ig.media.pin_comment(media_id, comment_id)``.
         Both methods probed with getattr; missing methods, post failure,
         or pin failure all return "" (or id if posted but pin missing) and
-        never raise.
+        never raise. Pin retries on NotFound: a fresh comment can take a
+        few seconds to become visible to the pin endpoint.
         """
         text = (text or "").strip()
         if not text or self._ig is None:
@@ -612,11 +614,19 @@ class InstagramAdapter:
         if not callable(pin_fn):
             log.warning("COMMENT pin unavailable, posted media=%s", media_pk)
             return comment_id
-        try:
-            pin_fn(str(media_pk), comment_id)
-            log.info("COMMENT pinned media=%s", media_pk)
-        except Exception as exc:
-            log.warning("COMMENT pin failed media=%s: %r", media_pk, exc)
+        for attempt in range(3):
+            try:
+                pin_fn(str(media_pk), comment_id)
+                log.info("COMMENT pinned media=%s", media_pk)
+                break
+            except Exception as exc:
+                if "NotFound" in type(exc).__name__ and attempt < 2:
+                    log.info("COMMENT pin not visible yet media=%s retry=%d",
+                             media_pk, attempt + 1)
+                    time.sleep(5)
+                    continue
+                log.warning("COMMENT pin failed media=%s: %r", media_pk, exc)
+                break
         return comment_id
 
     # -- error classification ----------------------------------------------
