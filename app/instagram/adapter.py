@@ -610,6 +610,20 @@ class InstagramAdapter:
         if not comment_id:
             log.warning("COMMENT posted but no id found media=%s", media_pk)
             return ""
+        log.info("COMMENT posted media=%s comment_id=%s keys=%s", media_pk,
+                 comment_id,
+                 sorted(result.keys()) if isinstance(result, dict) else type(result).__name__)
+        verify_fn = getattr(media_api, "get_comments", None)
+        if callable(verify_fn):
+            try:
+                listed = verify_fn(str(media_pk))
+                items = listed.get("comments", []) if isinstance(listed, dict) else []
+                seen = any(str(c.get("pk", "") if isinstance(c, dict)
+                               else getattr(c, "pk", "")) == str(comment_id)
+                           for c in items)
+                log.info("COMMENT verify media=%s visible=%s", media_pk, seen)
+            except Exception as exc:
+                log.warning("COMMENT verify failed media=%s: %r", media_pk, exc)
         pin_fn = getattr(media_api, "pin_comment", None)
         if not callable(pin_fn):
             log.warning("COMMENT pin unavailable, posted media=%s", media_pk)
