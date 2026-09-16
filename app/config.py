@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     SHARE_TO_FEED: bool = True  # also share reel preview to profile grid/feed (False = Reels tab only)
     REEL_CAPTION: str = "🎬 via @{username} #reels"
 
+    # Own comment + pin after upload (optional, off by default).
+    COMMENT_ENABLED: bool = False
+    COMMENT_TEXT: str = "FOLLOW ME"
+
     # Auto-archive (/archive hit every 24h): reels older than this, with
     # fewer views than this, get archived (owner-only, reversible in-app).
     ARCHIVE_MIN_AGE_HR: int = 24

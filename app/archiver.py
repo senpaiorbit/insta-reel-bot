@@ -77,24 +77,39 @@ def run_archive(*, settings, db, adapter,
             continue
         try:
             adapter.archive_media(pk)
+            deleted = False
         except Exception as exc:
-            err = f"{type(exc).__name__}: {str(exc)[:200]}"
-            activity.emit(f"ARCHIVE failed media={pk}: {err}")
-            log.warning("ARCHIVE failed media=%s: %r", pk, exc)
-            skipped.append({"destination_media_id": pk, "views": views,
-                            "reason": "archive_failed", "error": err})
-            continue
+            archive_err = f"{type(exc).__name__}: {str(exc)[:200]}"
+            log.warning("ARCHIVE failed media=%s: %r, trying delete fallback", pk, exc)
+            # Additive fallback: hard-delete when archive (only_me) fails.
+            # Non-fatal per-media either way; delete success still counts as
+            # handled (mark_archived as usual) with deleted=True.
+            try:
+                adapter.delete_media(pk)
+            except Exception as exc2:
+                err = f"{type(exc2).__name__}: {str(exc2)[:200]}"
+                activity.emit(f"ARCHIVE failed media={pk}: {err}")
+                log.warning("ARCHIVE delete fallback failed media=%s: %r", pk, exc2)
+                skipped.append({"destination_media_id": pk, "views": views,
+                                "reason": "archive_failed", "error": err,
+                                "archive_error": archive_err})
+                continue
+            deleted = True
+            activity.emit(f"ARCHIVE delete fallback ok media={pk} ({views} views)")
+            log.info("ARCHIVE delete fallback ok media=%s", pk)
         if not cand.get("untracked"):
             repo.mark_archived(db, src, str(cand.get("destination_account") or dest))
-        activity.emit(f"ARCHIVE done media={pk} ({views} views)")
+        activity.emit(f"ARCHIVE done media={pk} ({views} views) deleted={deleted}")
         archived.append({"destination_media_id": pk, "views": views,
                          "source_media_id": src,
-                         "untracked": bool(cand.get("untracked"))})
+                         "untracked": bool(cand.get("untracked")),
+                         "deleted": bool(deleted)})
         time.sleep(2)  # gentle pace between archive calls
 
     elapsed = round(time.time() - started, 1)
     result = {"status": "ok", "checked": len(candidates),
               "archived_count": len(archived), "archived": archived,
+              "deleted_count": sum(1 for a in archived if a.get("deleted")),
               "skipped": skipped, "min_age_hr": min_age_hr,
               "max_views": max_views, "elapsed_sec": elapsed,
               "dry_run": bool(dry_run), "only_pk": only_pk}
