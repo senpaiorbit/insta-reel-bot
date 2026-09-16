@@ -13,6 +13,11 @@ Verified against installed instaharvest-v2 source (not just docs):
                media/{id}/only_me/ (same private endpoint instagrapi and
                instagram_private_api's media_only_me() use). Three request
                shapes are tried; first {"status":"ok"} wins.
+  pin        : instaharvest-v2's pin_comment() posts to
+               media/{id}/comment/{cid}/pin/ which 404s persistently
+               (verified live); the working shape per instagrapi source
+               (mixins/comment.py::comment_pin) is
+               POST media/{id}/pin_comment/{cid}/ with trailing slash.
   upstream bug: installed GraphQL/users/client internals call bare
                ``build_request_headers()`` — patched at runtime, see
                ``patch_missing_library_imports()``.
@@ -577,12 +582,10 @@ class InstagramAdapter:
     def comment_and_pin(self, media_pk: str, text: str) -> str:
         """Post ``text`` on own media then pin it. Returns comment id or "".
 
-        Verified surface: ``ig.media.comment(media_id, text)`` -> dict with
-        comment id; ``ig.media.pin_comment(media_id, comment_id)``.
-        Both methods probed with getattr; missing methods, post failure,
-        or pin failure all return "" (or id if posted but pin missing) and
-        never raise. Pin retries on NotFound: a fresh comment can take a
-        few seconds to become visible to the pin endpoint.
+        Pin path per instagrapi source (mixins/comment.py::comment_pin):
+        ``POST media/{id}/pin_comment/{cid}/`` with trailing slash — the
+        ``media/{id}/comment/{cid}/pin/`` shape 404s persistently.
+        Never raises; pin failure still returns the comment id.
         """
         text = (text or "").strip()
         if not text or self._ig is None:
@@ -610,38 +613,49 @@ class InstagramAdapter:
         if not comment_id:
             log.warning("COMMENT posted but no id found media=%s", media_pk)
             return ""
-        log.info("COMMENT posted media=%s comment_id=%s keys=%s", media_pk,
-                 comment_id,
-                 sorted(result.keys()) if isinstance(result, dict) else type(result).__name__)
-        verify_fn = getattr(media_api, "get_comments", None)
-        if callable(verify_fn):
-            try:
-                listed = verify_fn(str(media_pk))
-                items = listed.get("comments", []) if isinstance(listed, dict) else []
-                seen = any(str(c.get("pk", "") if isinstance(c, dict)
-                               else getattr(c, "pk", "")) == str(comment_id)
-                           for c in items)
-                log.info("COMMENT verify media=%s visible=%s", media_pk, seen)
-            except Exception as exc:
-                log.warning("COMMENT verify failed media=%s: %r", media_pk, exc)
-        pin_fn = getattr(media_api, "pin_comment", None)
-        if not callable(pin_fn):
-            log.warning("COMMENT pin unavailable, posted media=%s", media_pk)
-            return comment_id
-        for attempt in range(3):
-            try:
-                pin_fn(str(media_pk), comment_id)
-                log.info("COMMENT pinned media=%s", media_pk)
-                break
-            except Exception as exc:
-                if "NotFound" in type(exc).__name__ and attempt < 2:
-                    log.info("COMMENT pin not visible yet media=%s retry=%d",
-                             media_pk, attempt + 1)
-                    time.sleep(5)
-                    continue
-                log.warning("COMMENT pin failed media=%s: %r", media_pk, exc)
-                break
+        log.info("COMMENT posted media=%s comment_id=%s", media_pk, comment_id)
+        if self._pin_comment(media_pk, comment_id):
+            log.info("COMMENT pinned media=%s", media_pk)
+        else:
+            log.warning("COMMENT pin failed media=%s", media_pk)
         return comment_id
+
+    def _pin_comment(self, media_pk: str, comment_id: str) -> bool:
+        """Pin one comment. Lib method first, raw pin_comment fallback."""
+        media_api = getattr(self._ig, "media", None)
+        pin_fn = getattr(media_api, "pin_comment", None)
+        if callable(pin_fn):
+            for attempt in range(2):
+                try:
+                    pin_fn(str(media_pk), comment_id)
+                    return True
+                except Exception as exc:
+                    if "NotFound" in type(exc).__name__ and attempt < 1:
+                        time.sleep(5)
+                        continue
+                    log.warning("COMMENT pin failed media=%s: %r", media_pk, exc)
+                    break
+        client = getattr(media_api, "_client", None)
+        raw_post = getattr(client, "post", None)
+        if not callable(raw_post):
+            return False
+        shapes = (
+            f"/media/{media_pk}/pin_comment/{comment_id}/",
+            f"media/{media_pk}/pin_comment/{comment_id}/",
+        )
+        for shape in shapes:
+            try:
+                raw_post(shape,
+                         data={"media_id": str(media_pk),
+                               "comment_id": str(comment_id)},
+                         rate_category="post_default")
+                log.info("COMMENT pinned via fallback media=%s shape=%s",
+                         media_pk, shape)
+                return True
+            except Exception as exc:
+                log.warning("COMMENT pin fallback failed media=%s shape=%s: %r",
+                            media_pk, shape, exc)
+        return False
 
     # -- error classification ----------------------------------------------
     @staticmethod
