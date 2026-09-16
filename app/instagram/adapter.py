@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from app.instagram import totp as _totp
+
 log = logging.getLogger(__name__)
 
 PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
@@ -325,7 +327,9 @@ class InstagramAdapter:
         except Exception as exc:
             log.warning("AUTH from_env failed: %r", exc)
         if username and password:
-            ig.login(username, password)
+            # Additive TOTP 2FA: no seed -> plain login (unchanged).
+            # Seed set -> just-in-time code + single fresh retry on TwoFactorRequired.
+            _totp.login_with_totp_retry(ig, username, password)
             try:
                 saver = getattr(ig, "save_session", None) or getattr(ig.auth, "save_session", None)
                 if callable(saver):
