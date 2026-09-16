@@ -20,9 +20,9 @@ MAX_URL_MAP_ENTRIES = 50
 
 def _cache_put(url: str, dest: Path) -> None:
     """Bound URL_MAP to the last 50 entries (oldest-first eviction)."""
-    _cache_put(url, dest)
-    while len(URL_MAP) > MAX_URL_MAP_ENTRIES:
+    while len(URL_MAP) >= MAX_URL_MAP_ENTRIES and url not in URL_MAP:
         URL_MAP.pop(next(iter(URL_MAP)))
+    URL_MAP[url] = dest
 
 
 MAX_COVER_BYTES = 10 * 1024 * 1024  # ~10MB cap for URL covers
