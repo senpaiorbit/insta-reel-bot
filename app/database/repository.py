@@ -27,10 +27,13 @@ def init_schema(db) -> None:
     for stmt in [s.strip() for s in schema.split(";") if s.strip()]:
         db.execute(stmt)
     # Migrate pre-existing DBs that were created before the archive columns.
+    # NOTE: idx name must stay globally unique — legacy DBs already have
+    # idx_processed_archive on processed_posts, so the reels archive index
+    # uses idx_processed_reels_archive (else IF NOT EXISTS is a silent no-op).
     for stmt in (
         "ALTER TABLE processed_reels ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE processed_reels ADD COLUMN archived_at TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_processed_archive"
+        "CREATE INDEX IF NOT EXISTS idx_processed_reels_archive"
         " ON processed_reels(status, archived, completed_at)",
     ):
         try:
