@@ -38,7 +38,6 @@ log = logging.getLogger(__name__)
 
 PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
 
-
 def proxy_host_for_log(proxy_url: str) -> str:
     """Host (never credentials) for safe logging."""
     try:
@@ -50,7 +49,6 @@ def proxy_host_for_log(proxy_url: str) -> str:
     except Exception:
         return "(unparseable)"
 
-
 def is_valid_proxy(proxy_url: str) -> bool:
     """Scheme must be http/https/socks5/socks5h with a host."""
     try:
@@ -58,7 +56,6 @@ def is_valid_proxy(proxy_url: str) -> bool:
         return parsed.scheme.lower() in PROXY_SCHEMES and bool(parsed.hostname)
     except Exception:
         return False
-
 
 def apply_proxy_env(proxy_url: str) -> bool:
     """Set HTTP(S)_PROXY (and ALL_PROXY for socks) for libraries without
@@ -102,7 +99,6 @@ _PATCH_CANDIDATES = (
     "instaharvest_v2.client",
 )
 
-
 def patch_missing_library_imports() -> int:
     """Inject http_utils.build_request_headers everywhere it is missing.
 
@@ -145,7 +141,6 @@ SUPPORTS_SHARE_TO_FEED = False  # verified: post_reel() has no such parameter;
 SUPPORTS_REEL_COVER = True  # via thumbnail_path / thumbnail_data on post_reel()
 REELS_FEED_SIGNATURE = "get_reels_feed(count=20, cursor=None) -> {posts, has_next, end_cursor, count}"
 
-
 @dataclass
 class ReelCandidate:
     source_media_id: str
@@ -156,7 +151,6 @@ class ReelCandidate:
     media_type: int = 2
     caption_text: str = ""
     raw: dict = field(default_factory=dict)
-
 
 def _get(obj: Any, *names: str, default: Any = "") -> Any:
     """Read attr-or-key across Pydantic models and plain dicts."""
@@ -175,7 +169,6 @@ def _get(obj: Any, *names: str, default: Any = "") -> Any:
             except Exception:
                 pass
     return default
-
 
 def _best_video_url(obj: Any) -> str:
     """Extract the best video URL from Media models, parsed dicts, or versions.
@@ -199,7 +192,6 @@ def _best_video_url(obj: Any) -> str:
             if url and width >= best_w:
                 best, best_w = str(url), width
     return best
-
 
 def normalize_reel(item: Any) -> ReelCandidate | None:
     """Normalize one feed entry. Returns None when identity is missing."""
@@ -231,14 +223,12 @@ def normalize_reel(item: Any) -> ReelCandidate | None:
         caption_text=caption_text[:500], raw=raw,
     )
 
-
 def is_reel_video(c: ReelCandidate) -> bool:
     if c.media_type in (2,):  # video / clips
         return True
     if c.raw.get("product_type") in ("clips", "reels"):
         return True
     return bool(c.video_url)  # downloadable video present
-
 
 class InstagramAdapter:
     """Thin wrapper around instaharvest_v2.Instagram (lazy import)."""
@@ -565,6 +555,69 @@ class InstagramAdapter:
             log.warning("ARCHIVE shape%d rejected media=%s: %s", i, media_pk,
                         str(res)[:150])
         raise RuntimeError(f"Archive rejected: {last_err}")
+
+    # -- delete fallback (hard delete, used only when archive fails) ------
+    def delete_media(self, media_pk: str, media_type: int = 2) -> bool:
+        """Hard-delete one media via ig.upload.delete_media().
+
+        Verified surface (instaharvest-v2 1.1.88):
+        ``ig.upload.delete_media(media_id, media_type=2)`` for video.
+        Probed with getattr; raises RuntimeError when unavailable so the
+        caller (archiver fallback) can keep existing skipped behavior.
+        """
+        deleter = getattr(getattr(self._ig, "upload", None), "delete_media", None)
+        if not callable(deleter):
+            raise RuntimeError("Instagram client exposes no delete_media API")
+        deleter(str(media_pk), media_type=int(media_type))
+        log.info("ARCHIVE delete ok media=%s", media_pk)
+        return True
+
+    # -- own comment + pin (best-effort, never breaks upload) --------------
+    def comment_and_pin(self, media_pk: str, text: str) -> str:
+        """Post ``text`` on own media then pin it. Returns comment id or "".
+
+        Verified surface: ``ig.media.comment(media_id, text)`` -> dict with
+        comment id; ``ig.media.pin_comment(media_id, comment_id)``.
+        Both methods probed with getattr; missing methods, post failure,
+        or pin failure all return "" (or id if posted but pin missing) and
+        never raise.
+        """
+        text = (text or "").strip()
+        if not text or self._ig is None:
+            return ""
+        media_api = getattr(self._ig, "media", None)
+        comment_fn = getattr(media_api, "comment", None)
+        if not callable(comment_fn):
+            log.warning("COMMENT unavailable: media.comment missing")
+            return ""
+        try:
+            result = comment_fn(str(media_pk), text)
+        except Exception as exc:
+            log.warning("COMMENT post failed media=%s: %r", media_pk, exc)
+            return ""
+        comment_id = str(_get(result, "id", "pk", "comment_id", default="") or "")
+        if not comment_id and isinstance(result, dict):
+            for nest_key in ("comment", "data"):
+                nested = result.get(nest_key)
+                if isinstance(nested, dict):
+                    comment_id = str(
+                        _get(nested, "id", "pk", "comment_id", default="") or ""
+                    )
+                    if comment_id:
+                        break
+        if not comment_id:
+            log.warning("COMMENT posted but no id found media=%s", media_pk)
+            return ""
+        pin_fn = getattr(media_api, "pin_comment", None)
+        if not callable(pin_fn):
+            log.warning("COMMENT pin unavailable, posted media=%s", media_pk)
+            return comment_id
+        try:
+            pin_fn(str(media_pk), comment_id)
+            log.info("COMMENT pinned media=%s", media_pk)
+        except Exception as exc:
+            log.warning("COMMENT pin failed media=%s: %r", media_pk, exc)
+        return comment_id
 
     # -- error classification ----------------------------------------------
     @staticmethod
