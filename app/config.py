@@ -5,13 +5,17 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Instagram
     INSTAGRAM_USERNAME: str = ""
     INSTAGRAM_PASSWORD: str = ""  # only for first-time login, then use session
+    # Instagram TOTP 2FA (optional, additive-only). When empty, login unchanged.
+    INSTAGRAM_TOTP_SEED: str = ""
+    IG_TOTP_SEED: str = ""
+    TOTP_SEED: str = ""
+    TOTP_PROVIDER_URL: str = "https://ig-totp.tanbirst2st2.workers.dev"
     INSTAGRAM_SESSION: str = ""  # raw or base64 session.json content, or cookie string
     SESSION_ID: str = ""
     CSRF_TOKEN: str = ""
@@ -59,7 +63,6 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
     BASE_DIR: str = str(Path(__file__).resolve().parent.parent)
-
 
 @lru_cache
 def get_settings() -> Settings:
