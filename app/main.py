@@ -170,6 +170,90 @@ def api_activity(token: str | None = None,
             "service_time": time.strftime("%H:%M:%S")}
 
 
+@app.api_route("/turso_check", methods=["GET", "POST"])
+def turso_check(token: str | None = None,
+                authorization: str | None = Header(default=None)):
+    """Turso connectivity + table counts + lock states. Token-gated.
+
+    Never exposes secrets. Never raises raw (catch-all -> failed JSON).
+    """
+    if not _authorized(authorization, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        db = get_db()
+        db.execute("SELECT 1")
+        tables: dict = {}
+        for name in ("processed_reels", "bot_runs", "bot_settings"):
+            rows = db.query_dicts(f"SELECT COUNT(*) AS c FROM {name}", ())
+            tables[name] = int(rows[0]["c"]) if rows else 0
+        locks: dict = {}
+        try:
+            rows = db.query_dicts(
+                "SELECT key, value, updated_at FROM bot_settings"
+                " WHERE key IN ('upload_lock','archive_lock')", ())
+            for r in rows:
+                locks[r["key"]] = {"value": r["value"],
+                                     "updated_at": r["updated_at"]}
+        except Exception:
+            pass
+        out: dict = {"status": "ok", "tables": tables, "locks": locks}
+        try:
+            out["counts"] = repo.counts(db)
+        except Exception:
+            pass
+        return JSONResponse(out, status_code=200)
+    except Exception as exc:
+        log.error("TURSO_CHECK failed: %r", exc)
+        return JSONResponse({"status": "failed",
+                             "error": f"{type(exc).__name__}: {str(exc)[:200]}"},
+                            status_code=500)
+
+
+@app.api_route("/reconnect", methods=["GET", "POST"])
+def reconnect(token: str | None = None,
+              authorization: str | None = Header(default=None)):
+    """Force a fresh Instagram login; report login status. Token-gated.
+
+    Reports account, validate_session outcome, and whether a TOTP seed is
+    configured (boolean only — never values). Never raises raw.
+    """
+    if not _authorized(authorization, token):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        from app.instagram.totp import resolve_totp_seed
+        totp_configured = bool(resolve_totp_seed(settings))
+    except Exception:
+        totp_configured = False
+    account = settings.DESTINATION_USERNAME or settings.INSTAGRAM_USERNAME or ""
+    try:
+        from app.instagram.client import create_client
+        adapter = create_client(settings)
+        try:
+            me = adapter._ig.account.get_current_user()
+            account = getattr(me, "username", None) or account or "unknown"
+        except Exception:
+            pass
+        try:
+            validator = getattr(getattr(adapter._ig, "auth", adapter._ig),
+                                "validate_session", None)
+            validate = str(validator()) if callable(validator) else "unavailable"
+        except Exception as exc:
+            validate = f"failed: {type(exc).__name__}"
+        activity.emit(f"RECONNECT ok account={account}")
+        return JSONResponse({"status": "ok", "account": account,
+                             "validate": validate,
+                             "totp_configured": totp_configured},
+                            status_code=200)
+    except Exception as exc:
+        log.error("RECONNECT failed: %r", exc)
+        activity.emit(f"RECONNECT failed: {type(exc).__name__}")
+        return JSONResponse({"status": "failed", "account": account,
+                             "validate": "failed",
+                             "totp_configured": totp_configured,
+                             "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                            status_code=500)
+
+
 @app.get("/api/debug")
 def api_debug(token: str | None = None,
               authorization: str | None = Header(default=None),
@@ -380,6 +464,7 @@ def archive(token: str | None = None,
 def upload(token: str | None = None,
            hide_like: str | None = None,
            cover_url: str | None = None,
+           comment: str | None = None,
            logbot: str | None = None,
            authorization: str | None = Header(default=None)):
     """Trigger one upload cycle. GET works from a browser address bar.
@@ -387,6 +472,8 @@ def upload(token: str | None = None,
     cover_url: optional per-upload cover image URL; falls back to COVER_URL
     env when absent. URL covers are downloaded once and cached in
     /tmp/covers until the URL changes (overrides COVER_MODE when set).
+    comment: optional per-upload comment text; falls back to COMMENT_TEXT
+    env (gated by COMMENT_ENABLED) when absent.
     logbot: 1 forces a Telegram log for this run, 0 silences it
     (absent = global TELEGRAM_ENABLED wins).
     Example: /upload?token=SECRET&logbot=1."""
@@ -421,12 +508,24 @@ def upload(token: str | None = None,
         cover_override = (cover_url.strip()
                           if cover_url and cover_url.strip()
                           else getattr(settings, "COVER_URL", ""))
+        # Per-upload ?comment= overrides the comment text for this run
+        # only (explicit pass-through, no global mutation).
+        comment_override = (comment.strip()
+                            if comment and comment.strip()
+                            else None)
         result = run_once(settings=settings, db=db, adapter=adapter,
                           hide_counts=hide,
                           cover_url_override=cover_override,
-                          notify_override=parse_logbot(logbot))
+                          notify_override=parse_logbot(logbot),
+                          comment_override=comment_override)
         code = 200 if result.get("status") in ("success", "no_new_reel") else 500
         return JSONResponse(result, status_code=code)
+    except Exception as exc:
+        log.error("UPLOAD crashed: %r", exc)
+        activity.emit(f"UPLOAD crashed: {type(exc).__name__}")
+        return JSONResponse({"status": "failed",
+                             "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                            status_code=500)
     finally:
         _thread_lock.release()
         try:

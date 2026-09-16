@@ -52,9 +52,19 @@ def resolve_caption(pick, template: str) -> tuple[str, bool]:
     return rendered, False
 
 
+def _resolve_comment_text(settings, comment_override: str | None = None) -> str:
+    """Own-comment text for this run: explicit ?comment= wins, else env."""
+    if comment_override and comment_override.strip():
+        return comment_override.strip()
+    if getattr(settings, "COMMENT_ENABLED", False):
+        return (getattr(settings, "COMMENT_TEXT", "") or "").strip()
+    return ""
+
+
 def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
              cover_url_override: str | None = None,
-             notify_override: bool | None = None) -> dict:
+             notify_override: bool | None = None,
+             comment_override: str | None = None) -> dict:
     t0 = time.time()
     run_id = repo.start_run(db)
     _safe_notify(settings, f"▶️ run #{run_id} started", notify_override)
@@ -110,7 +120,8 @@ def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
                                     dest=dest, pick=pick, counters=counters,
                                     run_id=run_id, t0=t0, hide_counts=hide,
                                     cover_url_override=cover_url_override,
-                                    notify_override=notify_override)
+                                    notify_override=notify_override,
+                                    comment_override=comment_override)
             return result
 
         repo.finish_run(db, run_id, "no_new_reel" if not last_error else "failed",
@@ -136,7 +147,8 @@ def run_once(*, settings, db, adapter, hide_counts: bool | None = None,
 def _upload_picked(*, db, adapter, settings, dest, pick, counters,
                    run_id: int, t0: float, hide_counts: bool,
                    cover_url_override: str | None = None,
-                   notify_override: bool | None = None) -> dict:
+                   notify_override: bool | None = None,
+                   comment_override: str | None = None) -> dict:
     """Download -> cover -> upload -> COMPLETED for a resolved candidate."""
     video_path = None
     cover_label = ""
@@ -174,17 +186,19 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             hide_counts=hide_counts, share_to_feed=bool(share))
         repo.mark_status(db, pick.source_media_id, dest, "COMPLETED",
                          destination_media_id=dest_pk)
-        # Own comment + pin (additive, best-effort): only when enabled.
-        # Never fails the upload; success shape unchanged except optional
-        # comment_id ("": disabled / unavailable / failed).
+        # Own comment + pin (additive, best-effort): explicit ?comment=
+        # wins, else COMMENT_ENABLED + COMMENT_TEXT env. Never fails upload.
         comment_id = ""
+        comment_posted = False
         try:
-            comment_text = (getattr(settings, "COMMENT_TEXT", "") or "").strip()
-            if getattr(settings, "COMMENT_ENABLED", False) and comment_text:
+            comment_text = _resolve_comment_text(settings, comment_override)
+            if comment_text:
                 comment_id = adapter.comment_and_pin(dest_pk, comment_text) or ""
+                comment_posted = bool(comment_id)
         except Exception as exc:  # noqa: BLE001 - comment must never raise
             log.warning("COMMENT hook failed dest=%s: %r", dest_pk, exc)
             comment_id = ""
+            comment_posted = False
         counters["reels_uploaded"] = 1
         log.info("DATABASE completed media_id=%s dest=%s", pick.source_media_id, dest_pk)
         activity.emit(f"UPLOAD success destination_media_id={dest_pk}")
@@ -206,6 +220,7 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             "like_hidden": hide_counts,
             "shared_to_feed": bool(share),
             "comment_id": comment_id,
+            "comment_posted": comment_posted,
             "elapsed_sec": elapsed,
         }
     except Exception as exc:  # noqa: BLE001 - must record + cleanup
