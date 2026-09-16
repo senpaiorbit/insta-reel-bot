@@ -174,6 +174,17 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             hide_counts=hide_counts, share_to_feed=bool(share))
         repo.mark_status(db, pick.source_media_id, dest, "COMPLETED",
                          destination_media_id=dest_pk)
+        # Own comment + pin (additive, best-effort): only when enabled.
+        # Never fails the upload; success shape unchanged except optional
+        # comment_id ("": disabled / unavailable / failed).
+        comment_id = ""
+        try:
+            comment_text = (getattr(settings, "COMMENT_TEXT", "") or "").strip()
+            if getattr(settings, "COMMENT_ENABLED", False) and comment_text:
+                comment_id = adapter.comment_and_pin(dest_pk, comment_text) or ""
+        except Exception as exc:  # noqa: BLE001 - comment must never raise
+            log.warning("COMMENT hook failed dest=%s: %r", dest_pk, exc)
+            comment_id = ""
         counters["reels_uploaded"] = 1
         log.info("DATABASE completed media_id=%s dest=%s", pick.source_media_id, dest_pk)
         activity.emit(f"UPLOAD success destination_media_id={dest_pk}")
@@ -194,6 +205,7 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
             "caption_copied": copied,
             "like_hidden": hide_counts,
             "shared_to_feed": bool(share),
+            "comment_id": comment_id,
             "elapsed_sec": elapsed,
         }
     except Exception as exc:  # noqa: BLE001 - must record + cleanup
