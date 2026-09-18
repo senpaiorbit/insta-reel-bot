@@ -532,3 +532,244 @@ def _get_instagrapi_client(adapter: Any) -> Any | None:
     except Exception as exc:
         log.debug("INSTAGRAPI unavailable, harvest fallback: %r", exc)
         return None
+
+class InstagramAdapter:
+    """Thin wrapper around instaharvest_v2.Instagram (lazy import)."""
+
+    def __init__(self, session_file: str = "/tmp/igh_session.json"):
+        self._ig: Any = None
+        self.session_file = session_file
+        # Additive stealth state: instagrapi client cache + creds for its
+        # try-first path. Harvest (self._ig) stays the primary/fallback.
+        self._insta_g: Any = None
+        self._username: str = ""
+        self._password: str = ""
+
+    # -- construction -----------------------------------------------------
+    def _new_client(self, proxy_url: str = "") -> Any:
+        try:
+            from instaharvest_v2 import Instagram
+        except ImportError as exc:
+            raise RuntimeError(
+                "instaharvest-v2 is not installed. "
+                "Add 'instaharvest-v2' to requirements.txt and deploy to Render."
+            ) from exc
+        patch_missing_library_imports()
+        proxy_url = (proxy_url or "").strip()
+        if proxy_url:
+            if not is_valid_proxy(proxy_url):
+                log.warning("PROXY invalid scheme/host, running direct (host=%s)",
+                            proxy_host_for_log(proxy_url))
+            else:
+                # Prefer a native constructor proxy param when the installed
+                # library accepts one; otherwise fall back to env vars.
+                try:
+                    import inspect as _inspect
+                    params = _inspect.signature(Instagram.__init__).parameters
+                    names = {n.lower() for n in params}
+                    for cand in ("proxy", "proxy_url", "proxies", "http_proxy"):
+                        if cand in names:
+                            real = next(n for n in params if n.lower() == cand)
+                            log.info("PROXY enabled host=%s via ctor param=%s",
+                                     proxy_host_for_log(proxy_url), real)
+                            return Instagram(**{real: proxy_url})
+                except Exception as exc:
+                    log.warning("PROXY ctor probe failed, using env fallback: %r", exc)
+                apply_proxy_env(proxy_url)
+                return Instagram()
+        return Instagram()
+
+    def load_session(self, *, username: str = "", password: str = "",
+                      session_blob: str = "", env_cookies: dict | None = None,
+                      proxy_url: str = "") -> Any:
+        """Restore session without persisting anything outside /tmp.
+
+        Precedence: INSTAGRAM_SESSION blob (raw/base64 session.json) >
+        SESSION_ID/CSRF_TOKEN/DS_USER_ID cookies via from_env > fresh login.
+        """
+        # Additive: remember creds/proxy for the try-instagrapi-first path.
+        # Harvest login below is unchanged.
+        try:
+            self._username = (username or "").strip()
+            self._password = (password or "").strip()
+            self._proxy_url = (proxy_url or "").strip()
+        except Exception:
+            pass
+        ig = self._new_client(proxy_url=proxy_url)
+        blob = (session_blob or "").strip()
+        if blob:
+            data = blob
+            try:  # base64-encoded session.json?
+                decoded = base64.b64decode(blob).decode("utf-8")
+                json.loads(decoded)
+                data = decoded
+            except (binascii.Error, ValueError, UnicodeDecodeError):
+                pass
+            if data.lstrip().startswith("{"):
+                with open(self.session_file, "w") as fh:
+                    fh.write(data)
+                try:
+                    loader = getattr(ig.auth, "load_session", None)
+                    if callable(loader):
+                        loader(self.session_file)
+                    else:  # older API: Instagram.from_session_file
+                        from instaharvest_v2 import Instagram as IG
+                        ig = IG.from_session_file(self.session_file)
+                    log.info("AUTH session restored from INSTAGRAM_SESSION blob")
+                    return self._validated(ig)
+                except Exception as exc:
+                    log.warning("AUTH blob session failed: %r", exc)
+            else:
+                log.warning("AUTH INSTAGRAM_SESSION is not session JSON; trying cookies/login")
+        try:
+            from instaharvest_v2 import Instagram as IG
+            if os.environ.get("SESSION_ID"):
+                # NOTE: from_env() builds its own client, bypassing the
+                # proxy ctor param; the HTTP(S)_PROXY/ALL_PROXY env fallback
+                # (applied in create_client) still routes it when PROXY_URL set.
+                ig = IG.from_env()
+                log.info("AUTH session loaded via from_env cookies")
+                return self._validated(ig)
+        except Exception as exc:
+            log.warning("AUTH from_env failed: %r", exc)
+        if username and password:
+            # Additive TOTP 2FA: no seed -> plain login (unchanged).
+            # Seed set -> just-in-time code + single fresh retry on TwoFactorRequired.
+            _totp.login_with_totp_retry(ig, username, password)
+            try:
+                saver = getattr(ig, "save_session", None) or getattr(ig.auth, "save_session", None)
+                if callable(saver):
+                    saver(self.session_file)
+            except Exception:
+                pass
+            log.info("AUTH fresh login completed")
+            return self._validated(ig)
+        raise RuntimeError(
+            "No usable Instagram session: set INSTAGRAM_SESSION (session.json content), "
+            "or SESSION_ID/CSRF_TOKEN/DS_USER_ID cookies, or INSTAGRAM_USERNAME/PASSWORD."
+        )
+
+    def _validated(self, ig: Any) -> Any:
+        validator = getattr(getattr(ig, "auth", ig), "validate_session", None)
+        if callable(validator):
+            try:
+                ok = validator()
+                if ok is False:
+                    log.warning("AUTH validate_session returned False; proceeding "
+                                "anyway, feed will confirm")
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                log.warning("AUTH validate_session inconclusive: %r", exc)
+        self._ig = ig
+        return ig
+
+    # -- reels feed (dedicated endpoint, paginated to `count`) ------------
+    def get_reels(self, count: int = 30) -> list[ReelCandidate]:
+        if self._ig is None:
+            raise RuntimeError("Instagram client not loaded; call load_session() first")
+        log.info("DISCOVERY started target=%d", count)
+        items: list = []
+        cursor = None
+        seen_pages = 0
+        # Real signature (installed source): get_reels_feed(count, cursor)
+        # -> {posts, has_next, end_cursor, count}. REST fallback may use
+        # {items, more_available, next_max_id} — accept both.
+        while len(items) < count and seen_pages < 10:
+            page = self._ig.feed.get_reels_feed(count=min(count, 20), cursor=cursor)
+            if isinstance(page, dict):
+                batch = page.get("posts", page.get("items", []))
+            else:
+                batch = []
+            if not batch and hasattr(page, "items") and not isinstance(page, dict):
+                items_attr = page.items  # type: ignore[union-attr]
+                batch = items_attr if isinstance(items_attr, list) else []
+            if not batch:
+                break
+            items.extend(batch)
+            if isinstance(page, dict):
+                more = page.get("has_next", page.get("more_available", False))
+                cursor = page.get("end_cursor", page.get("next_max_id"))
+            else:
+                more, cursor = False, None
+            seen_pages += 1
+            if not more or not cursor:
+                break
+        out = []
+        for entry in items[:count]:
+            cand = normalize_reel(entry)
+            if cand:
+                out.append(cand)
+        log.info("DISCOVERY found=%d usable=%d", len(items), len(out))
+        return out
+
+    # -- video url fallback ------------------------------------------------
+    def ensure_video_url(self, cand: ReelCandidate) -> ReelCandidate:
+        """Fill cand.video_url trying every known resolver. Never raises."""
+        from app import activity as _act
+        if cand.video_url:
+            return cand
+        _act.emit(f"RESOLVE start media_id={cand.source_media_id} "
+                  f"shortcode={cand.shortcode or '-'}")
+        log.info("RESOLVE start media_id=%s shortcode=%s",
+                 cand.source_media_id, cand.shortcode or "-")
+        if not cand.shortcode:
+            _act.emit("RESOLVE abort: no shortcode")
+            return cand
+        # 1) authenticated media lookup (Media model carries video_versions)
+        _act.emit("RESOLVE trying media.get_by_shortcode ...")
+        try:
+            media = self._ig.media.get_by_shortcode(cand.shortcode)
+            url = _best_video_url(media)
+            _act.emit(f"RESOLVE media.get_by_shortcode done has_url={bool(url)}")
+            if url:
+                cand.video_url = str(url)
+                return cand
+        except Exception as exc:
+            _act.emit(f"RESOLVE media.get_by_shortcode failed: {type(exc).__name__}")
+            log.warning("DISCOVERY media.get_by_shortcode failed for %s: %r",
+                        cand.shortcode, exc)
+        # 2) anonymous public lookup (no session needed)
+        _act.emit("RESOLVE trying public.get_post_by_shortcode ...")
+        try:
+            post = self._ig.public.get_post_by_shortcode(cand.shortcode)
+            url = _best_video_url(post)
+            _act.emit(f"RESOLVE public lookup done has_url={bool(url)}")
+            if url:
+                cand.video_url = str(url)
+                return cand
+        except Exception as exc:
+            _act.emit(f"RESOLVE public lookup failed: {type(exc).__name__}")
+            log.warning("DISCOVERY public lookup failed for %s: %r",
+                        cand.shortcode, exc)
+        # 3) media info by pk
+        _act.emit("RESOLVE trying media.get_info ...")
+        try:
+            getter = getattr(getattr(self._ig, "media", None), "get_info", None)
+            if callable(getter) and cand.source_media_id:
+                media = getter(cand.source_media_id)
+                url = _best_video_url(media)
+                _act.emit(f"RESOLVE get_info done has_url={bool(url)}")
+                if url:
+                    cand.video_url = str(url)
+            else:
+                _act.emit("RESOLVE get_info unavailable")
+        except Exception as exc:
+            _act.emit(f"RESOLVE get_info failed: {type(exc).__name__}")
+            log.warning("DISCOVERY media.get_info failed for %s: %r",
+                        cand.source_media_id, exc)
+        # 4) yt-dlp fallback (additive stealth resolver; lazy import, never
+        # raises). Harvest paths 1-3 above are untouched and stay first.
+        _act.emit("RESOLVE trying yt-dlp fallback ...")
+        try:
+            url = _resolve_with_ytdlp(cand.shortcode)
+            _act.emit(f"RESOLVE yt-dlp done has_url={bool(url)}")
+            if url:
+                cand.video_url = str(url)
+                return cand
+        except Exception as exc:  # noqa: BLE001 - fallback must never raise
+            _act.emit(f"RESOLVE yt-dlp failed: {type(exc).__name__}")
+            log.warning("DISCOVERY yt-dlp fallback failed for %s: %r",
+                        cand.shortcode, exc)
+        _act.emit("RESOLVE exhausted: no video_url found")
+        return cand
