@@ -125,17 +125,21 @@ def select_cover(*, mode: str, cover_dir: str | Path, fixed_file: str = "",
                  db=None, total_hint: int = 0, cover_url: str = "") -> Path:
     """Return a cover path. sequential mode uses Turso counter (crash-safe).
 
-    If cover_url is non-empty it takes precedence (URL mode): the image is
+    Precedence (unchanged): explicit ``cover_url`` (per-upload ?cover_url=
+    or COVER_URL env, already resolved by the caller) wins over COVER_MODE;
     downloaded once and cached in /tmp/covers until the URL changes.
     """
-    if cover_url and cover_url.strip():
-        path = cover_from_url(cover_url.strip())
+    # URL override first: explicit per-upload value wins, else env value —
+    # the caller (worker) already applies that precedence; re-strip here so
+    # whitespace-only values fall through to COVER_MODE instead of erroring.
+    if cover_url is not None and str(cover_url).strip():
+        path = cover_from_url(str(cover_url).strip())
         log.info("COVER selected=%s mode=url", path)
         return path
     covers = discover_covers(cover_dir)
     if not covers:
         raise FileNotFoundError(f"No cover images (*{sorted(ALLOWED_EXTS)}) in {cover_dir}/")
-    mode = (mode or "random").lower()
+    mode = (str(mode or "random")).strip().lower() or "random"
     if mode == "fixed":
         if not fixed_file:
             raise ValueError("COVER_FILE must be set when COVER_MODE=fixed")
@@ -158,9 +162,15 @@ def select_cover(*, mode: str, cover_dir: str | Path, fixed_file: str = "",
 
 
 def validate_cover(path: Path) -> None:
-    if not path.is_file():
-        raise ValueError(f"Cover not found: {path}")
-    if path.suffix.lower() not in ALLOWED_EXTS:
-        raise ValueError(f"Unsupported cover extension: {path.suffix}")
-    if path.stat().st_size == 0:
-        raise ValueError(f"Cover is empty: {path}")
+    """Crash early on missing/unsupported/empty covers. Never downloads."""
+    p = Path(path) if not isinstance(path, Path) else path
+    if not p.is_file():
+        raise ValueError(f"Cover not found: {p}")
+    if p.suffix.lower() not in ALLOWED_EXTS:
+        raise ValueError(f"Unsupported cover extension: {p.suffix}")
+    try:
+        size = p.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"Cover unreadable: {p}: {exc}") from exc
+    if size == 0:
+        raise ValueError(f"Cover is empty: {p}")
