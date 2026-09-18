@@ -53,11 +53,21 @@ def resolve_caption(pick, template: str) -> tuple[str, bool]:
 
 
 def _resolve_comment_text(settings, comment_override: str | None = None) -> str:
-    """Own-comment text for this run: explicit ?comment= wins, else env."""
-    if comment_override and comment_override.strip():
-        return comment_override.strip()
-    if getattr(settings, "COMMENT_ENABLED", False):
-        return (getattr(settings, "COMMENT_TEXT", "") or "").strip()
+    """Own-comment text for this run: explicit ?comment= wins, else env.
+
+    Precedence (unchanged): non-empty override first, then COMMENT_ENABLED
+    + COMMENT_TEXT env. Always returns str; never raises.
+    """
+    try:
+        if comment_override is not None and str(comment_override).strip():
+            return str(comment_override).strip()
+    except Exception:
+        pass
+    try:
+        if getattr(settings, "COMMENT_ENABLED", False):
+            return (str(getattr(settings, "COMMENT_TEXT", "") or "")).strip()
+    except Exception:
+        pass
     return ""
 
 
@@ -161,9 +171,18 @@ def _upload_picked(*, db, adapter, settings, dest, pick, counters,
 
         # COVER_URL env (or per-upload ?cover_url= override) wins over
         # COVER_MODE when set; downloaded once and cached until URL changes.
-        effective_cover_url = (cover_url_override
-                               if cover_url_override is not None
-                               else getattr(settings, "COVER_URL", ""))
+        # Precedence: non-empty ?cover_url= first, else COVER_URL env.
+        # Whitespace-only overrides fall back to env (never blank the cover).
+        _raw_cover_override = cover_url_override
+        try:
+            _ov = str(_raw_cover_override).strip() if _raw_cover_override is not None else ""
+        except Exception:
+            _ov = ""
+        try:
+            _env_cover = str(getattr(settings, "COVER_URL", "") or "").strip()
+        except Exception:
+            _env_cover = ""
+        effective_cover_url = _ov or _env_cover
         cover = cover_mod.select_cover(
             mode=settings.COVER_MODE, cover_dir=settings.COVER_DIR,
             fixed_file=settings.COVER_FILE, db=db,
