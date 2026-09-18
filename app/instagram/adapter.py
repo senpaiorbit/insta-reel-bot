@@ -499,13 +499,7 @@ def _resolve_with_ytdlp(shortcode: str) -> str:
 
 
 def _get_instagrapi_client(adapter: Any) -> Any | None:
-    """Logged-in instagrapi client or None. Never raises.
-
-    Try-instagrapi-first helper: returns the cached client when present,
-    else attempts a best-effort login with stored creds when both the
-    library and creds are available. Any failure -> None (caller falls
-    back to the harvest path, which MUST stay intact).
-    """
+    """Logged-in instagrapi client or None. Never raises."""
     try:
         cached = getattr(adapter, "_insta_g", None)
         if cached is not None:
@@ -533,4 +527,43 @@ def _get_instagrapi_client(adapter: Any) -> Any | None:
         log.debug("INSTAGRAPI unavailable, harvest fallback: %r", exc)
         return None
 
-FULL_ADAPTER_NOTE = "helpers section ends here; class body follows in next commit"
+class InstagramAdapter:
+    """Thin wrapper around instaharvest_v2.Instagram (lazy import)."""
+
+    def __init__(self, session_file: str = "/tmp/igh_session.json"):
+        self._ig: Any = None
+        self.session_file = session_file
+        self._insta_g: Any = None
+        self._username: str = ""
+        self._password: str = ""
+
+    def _new_client(self, proxy_url: str = "") -> Any:
+        try:
+            from instaharvest_v2 import Instagram
+        except ImportError as exc:
+            raise RuntimeError(
+                "instaharvest-v2 is not installed. "
+                "Add 'instaharvest-v2' to requirements.txt and deploy to Render."
+            ) from exc
+        patch_missing_library_imports()
+        proxy_url = (proxy_url or "").strip()
+        if proxy_url:
+            if not is_valid_proxy(proxy_url):
+                log.warning("PROXY invalid scheme/host, running direct (host=%s)",
+                            proxy_host_for_log(proxy_url))
+            else:
+                try:
+                    import inspect as _inspect
+                    params = _inspect.signature(Instagram.__init__).parameters
+                    names = {n.lower() for n in params}
+                    for cand in ("proxy", "proxy_url", "proxies", "http_proxy"):
+                        if cand in names:
+                            real = next(n for n in params if n.lower() == cand)
+                            log.info("PROXY enabled host=%s via ctor param=%s",
+                                     proxy_host_for_log(proxy_url), real)
+                            return Instagram(**{real: proxy_url})
+                except Exception as exc:
+                    log.warning("PROXY ctor probe failed, using env fallback: %r", exc)
+                apply_proxy_env(proxy_url)
+                return Instagram()
+        return Instagram()
